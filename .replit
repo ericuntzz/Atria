@@ -1,13 +1,47 @@
-modules = ["nodejs-20", "python-3.11"]
-[agent]
-expertMode = true
+modules = ["nodejs-20", "python-3.11", "nix"]
 
 [nix]
-channel = "stable-25_05"
-packages = ["freetype", "lcms2", "libimagequant", "libjpeg", "libtiff", "libwebp", "libxcrypt", "openjpeg", "tcl", "tk", "zlib"]
+channel = "stable-24_05"
+
+[deployment]
+run = ["sh", "-c", "npm run build && npm run start"]
+deploymentTarget = "autoscale"
+
+[[ports]]
+localPort = 3000
+externalPort = 80
+
+[[ports]]
+localPort = 5000
+externalPort = 5000
+
+[[ports]]
+localPort = 8000
+externalPort = 8000
 
 [workflows]
 runButton = "Project"
+
+[[workflows.workflow]]
+name = "Start Dev"
+mode = "parallel"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "npm install && npm run dev"
+waitForPort = 5000
+
+[workflows.workflow.metadata]
+outputType = "webview"
+
+[[workflows.workflow]]
+name = "DB Push"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "npx drizzle-kit push"
 
 [[workflows.workflow]]
 name = "Project"
@@ -16,23 +50,11 @@ author = "agent"
 
 [[workflows.workflow.tasks]]
 task = "workflow.run"
-args = "Start application"
+args = "Start Dev"
 
 [[workflows.workflow.tasks]]
 task = "workflow.run"
 args = "Vision Service"
-
-[[workflows.workflow]]
-name = "Start application"
-author = "agent"
-
-[workflows.workflow.metadata]
-outputType = "webview"
-
-[[workflows.workflow.tasks]]
-task = "shell.exec"
-args = "npm run dev"
-waitForPort = 5000
 
 [[workflows.workflow]]
 name = "Vision Service"
@@ -40,27 +62,11 @@ author = "agent"
 
 [[workflows.workflow.tasks]]
 task = "shell.exec"
-args = "cd vision-service && uvicorn main:app --reload --host 0.0.0.0 --port 8000"
+args = "cd vision-service && pip install -r requirements.txt && uvicorn main:app --reload --host 0.0.0.0 --port 8000"
 waitForPort = 8000
 
 [workflows.workflow.metadata]
 outputType = "console"
 
-[[ports]]
-localPort = 3000
-externalPort = 3000
-
-[[ports]]
-localPort = 5000
-externalPort = 80
-
-[deployment]
-deploymentTarget = "autoscale"
-build = ["npm", "run", "build"]
-publicDir = "dist"
-run = ["npm", "run", "start"]
-
-[userenv]
-
-[userenv.shared]
-VISION_SERVICE_URL = "http://localhost:8000"
+[agent]
+expertMode = true
