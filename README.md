@@ -1,16 +1,75 @@
-# React + Vite
+# The Eye
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+AI-Powered Visual Intelligence for Luxury Property Management.
 
-Currently, two official plugins are available:
+## Architecture
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+```
+Next.js (TypeScript)          Python FastAPI
+├── Frontend (App Router)     ├── Claude Vision API
+├── Supabase Auth             ├── Image Processing
+├── BFF API Routes            └── Custom ML Models (Phase 2)
+└── Dashboard UI
+         │                           │
+         └───── PostgreSQL ──────────┘
+               (Drizzle ORM)
+```
 
-## React Compiler
+## Tech Stack
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+| Layer | Technology |
+|-------|-----------|
+| Frontend | Next.js 15, React 19, Tailwind CSS 4, Radix UI |
+| Auth | Supabase Auth |
+| Database | PostgreSQL + Drizzle ORM |
+| Vision AI | Claude Vision API (Python FastAPI service) |
+| Deployment | Replit |
 
-## Expanding the ESLint configuration
+## Getting Started
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+### Prerequisites
+- Node.js 20+
+- Python 3.11+
+- PostgreSQL database (Neon recommended)
+- Supabase project (for auth)
+- Anthropic API key
+
+### Environment Variables
+Copy `.env.example` to `.env` and fill in your values.
+
+### Development
+
+```bash
+# Install dependencies
+npm install
+cd vision-service && pip install -r requirements.txt && cd ..
+
+# Push database schema
+npm run db:push
+
+# Start both services
+npm run dev:all
+```
+
+- Next.js app: http://localhost:3000
+- Vision service: http://localhost:8000
+- Vision API docs: http://localhost:8000/docs
+
+## Project Structure
+
+```
+├── src/                    # Next.js frontend
+│   ├── app/               # App Router pages & API routes
+│   ├── components/        # React components
+│   ├── hooks/             # Custom hooks
+│   ├── lib/               # Utilities & Supabase clients
+│   └── styles/            # Global CSS
+├── server/                # Shared server code
+│   ├── schema.ts          # Drizzle ORM schema
+│   └── db.ts              # Database connection
+├── vision-service/        # Python FastAPI
+│   ├── main.py            # FastAPI app
+│   ├── routers/           # API endpoints
+│   └── services/          # Vision AI logic
+└── drizzle/               # Database migrations
+```

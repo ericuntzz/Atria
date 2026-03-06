@@ -50,6 +50,9 @@ export const properties = pgTable("properties", {
   squareFeet: integer("square_feet"),
   estimatedValue: varchar("estimated_value"),
   notes: text("notes"),
+  coverImageUrl: text("cover_image_url"),
+  trainingStatus: varchar("training_status").default("untrained"), // untrained, training, trained
+  trainingCompletedAt: timestamp("training_completed_at"),
   createdAt: timestamp("created_at").defaultNow(),
   updatedAt: timestamp("updated_at").defaultNow(),
 });
@@ -58,7 +61,7 @@ export type Property = typeof properties.$inferSelect;
 export type InsertProperty = typeof properties.$inferInsert;
 
 // ============================================================================
-// Rooms (per property)
+// Rooms (per property — auto-created by AI during training)
 // ============================================================================
 
 export const rooms = pgTable("rooms", {
@@ -68,12 +71,36 @@ export const rooms = pgTable("rooms", {
     .notNull(),
   name: varchar("name").notNull(), // "Master Bedroom", "Kitchen", etc.
   description: text("description"),
+  roomType: varchar("room_type"), // bedroom, bathroom, kitchen, living, outdoor, garage, etc.
   sortOrder: integer("sort_order").default(0),
+  coverImageUrl: text("cover_image_url"),
   createdAt: timestamp("created_at").defaultNow(),
 });
 
 export type Room = typeof rooms.$inferSelect;
 export type InsertRoom = typeof rooms.$inferInsert;
+
+// ============================================================================
+// Items (per room — auto-detected by AI during training)
+// ============================================================================
+
+export const items = pgTable("items", {
+  id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+  roomId: uuid("room_id")
+    .references(() => rooms.id, { onDelete: "cascade" })
+    .notNull(),
+  name: varchar("name").notNull(), // "Leather Sofa", "Crystal Vase", etc.
+  category: varchar("category"), // furniture, decor, appliance, fixture, art, etc.
+  description: text("description"),
+  condition: varchar("condition").default("good"), // excellent, good, fair, poor
+  importance: varchar("importance").default("normal"), // critical, high, normal, low
+  imageUrl: text("image_url"), // cropped/reference image of just this item
+  metadata: jsonb("metadata").$type<Record<string, string>>(), // AI-detected attributes
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export type Item = typeof items.$inferSelect;
+export type InsertItem = typeof items.$inferInsert;
 
 // ============================================================================
 // Baseline Images (the "perfect" state of each room)
@@ -93,6 +120,27 @@ export const baselineImages = pgTable("baseline_images", {
 
 export type BaselineImage = typeof baselineImages.$inferSelect;
 export type InsertBaselineImage = typeof baselineImages.$inferInsert;
+
+// ============================================================================
+// Media Uploads (raw uploaded files before AI processing)
+// ============================================================================
+
+export const mediaUploads = pgTable("media_uploads", {
+  id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+  propertyId: uuid("property_id")
+    .references(() => properties.id, { onDelete: "cascade" })
+    .notNull(),
+  fileUrl: text("file_url").notNull(),
+  fileName: varchar("file_name").notNull(),
+  fileType: varchar("file_type").notNull(), // image/jpeg, video/mp4, etc.
+  fileSize: integer("file_size"), // bytes
+  processingStatus: varchar("processing_status").default("pending"), // pending, processing, completed, failed
+  aiAnalysis: jsonb("ai_analysis"), // Raw AI analysis result
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export type MediaUpload = typeof mediaUploads.$inferSelect;
+export type InsertMediaUpload = typeof mediaUploads.$inferInsert;
 
 // ============================================================================
 // Inspections
@@ -169,6 +217,7 @@ export const propertiesRelations = relations(properties, ({ one, many }) => ({
   }),
   rooms: many(rooms),
   inspections: many(inspections),
+  mediaUploads: many(mediaUploads),
 }));
 
 export const roomsRelations = relations(rooms, ({ one, many }) => ({
@@ -177,12 +226,27 @@ export const roomsRelations = relations(rooms, ({ one, many }) => ({
     references: [properties.id],
   }),
   baselineImages: many(baselineImages),
+  items: many(items),
+}));
+
+export const itemsRelations = relations(items, ({ one }) => ({
+  room: one(rooms, {
+    fields: [items.roomId],
+    references: [rooms.id],
+  }),
 }));
 
 export const baselineImagesRelations = relations(baselineImages, ({ one }) => ({
   room: one(rooms, {
     fields: [baselineImages.roomId],
     references: [rooms.id],
+  }),
+}));
+
+export const mediaUploadsRelations = relations(mediaUploads, ({ one }) => ({
+  property: one(properties, {
+    fields: [mediaUploads.propertyId],
+    references: [properties.id],
   }),
 }));
 

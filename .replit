@@ -9,10 +9,6 @@ deploymentTarget = "autoscale"
 
 [[ports]]
 localPort = 3000
-externalPort = 3000
-
-[[ports]]
-localPort = 5000
 externalPort = 80
 
 [[ports]]
@@ -20,44 +16,27 @@ localPort = 8000
 externalPort = 8000
 
 [workflows]
-runButton = "Project"
+runButton = "Start Dev"
 
 [[workflows.workflow]]
-name = "Project"
+name = "Start Dev"
 mode = "parallel"
 author = "agent"
 
 [[workflows.workflow.tasks]]
-task = "workflow.run"
-args = "Start application"
-
-[[workflows.workflow.tasks]]
-task = "workflow.run"
-args = "Vision Service"
-
-[[workflows.workflow]]
-name = "Start application"
-author = "agent"
+task = "shell.exec"
+args = "npm install && npm run dev"
+waitForPort = 3000
 
 [[workflows.workflow.tasks]]
 task = "shell.exec"
-args = "npm run dev"
-waitForPort = 5000
-
-[workflows.workflow.metadata]
-outputType = "webview"
-
-[[workflows.workflow]]
-name = "Vision Service"
-author = "agent"
-
-[[workflows.workflow.tasks]]
-task = "shell.exec"
-args = "cd vision-service && uvicorn main:app --reload --host 0.0.0.0 --port 8000"
+args = "cd vision-service && pip install -r requirements.txt && uvicorn main:app --reload --host 0.0.0.0 --port 8000"
 waitForPort = 8000
 
-[workflows.workflow.metadata]
-outputType = "console"
+[[workflows.workflow]]
+name = "DB Push"
+author = "agent"
 
-[agent]
-expertMode = true
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "npx drizzle-kit push"

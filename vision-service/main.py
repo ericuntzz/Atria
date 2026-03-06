@@ -2,7 +2,7 @@ import os
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from routers import compare
+from routers import compare, analyze
 
 load_dotenv()
 
@@ -20,7 +20,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(compare.router, prefix="/api/v1")
+app.include_router(compare.router, prefix="/api/vision")
+app.include_router(analyze.router, prefix="/api/vision")
 
 
 @app.get("/health")
