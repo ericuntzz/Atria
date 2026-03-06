@@ -3,13 +3,6 @@
 import { useState } from "react";
 import { createClient } from "@/lib/supabase/client";
 import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Eye } from "lucide-react";
@@ -60,20 +53,25 @@ export default function LoginPage() {
 
   return (
     <div className="flex min-h-screen items-center justify-center bg-background px-4">
-      <Card className="w-full max-w-md">
-        <CardHeader className="text-center">
-          <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-primary">
-            <Eye className="h-6 w-6 text-primary-foreground" />
+      <div className="w-full max-w-sm">
+        {/* Logo */}
+        <div className="text-center mb-8">
+          <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-xl bg-primary/10">
+            <Eye className="h-7 w-7 text-primary" />
           </div>
-          <CardTitle className="text-2xl">The Eye</CardTitle>
-          <CardDescription>
-            AI-Powered Visual Intelligence for Luxury Property Management
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
+          <h1 className="text-2xl font-semibold text-foreground">The Eye</h1>
+          <p className="text-sm text-muted-foreground mt-1">
+            AI-Powered Visual Intelligence
+          </p>
+        </div>
+
+        {/* Form */}
+        <div className="rounded-xl border border-border bg-card p-6">
           <form onSubmit={handleSubmit} className="space-y-4">
             <div className="space-y-2">
-              <Label htmlFor="email">Email</Label>
+              <Label htmlFor="email" className="text-foreground">
+                Email
+              </Label>
               <Input
                 id="email"
                 type="email"
@@ -81,10 +79,13 @@ export default function LoginPage() {
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
                 required
+                className="bg-input-background border-border text-foreground placeholder:text-muted-foreground"
               />
             </div>
             <div className="space-y-2">
-              <Label htmlFor="password">Password</Label>
+              <Label htmlFor="password" className="text-foreground">
+                Password
+              </Label>
               <Input
                 id="password"
                 type="password"
@@ -93,6 +94,7 @@ export default function LoginPage() {
                 onChange={(e) => setPassword(e.target.value)}
                 required
                 minLength={6}
+                className="bg-input-background border-border text-foreground placeholder:text-muted-foreground"
               />
             </div>
 
@@ -100,7 +102,7 @@ export default function LoginPage() {
               <p className="text-sm text-destructive">{error}</p>
             )}
             {message && (
-              <p className="text-sm text-muted-foreground">{message}</p>
+              <p className="text-sm text-green-400">{message}</p>
             )}
 
             <Button type="submit" className="w-full" disabled={loading}>
@@ -112,10 +114,12 @@ export default function LoginPage() {
             </Button>
 
             <p className="text-center text-sm text-muted-foreground">
-              {isSignUp ? "Already have an account?" : "Don't have an account?"}{" "}
+              {isSignUp
+                ? "Already have an account?"
+                : "Don't have an account?"}{" "}
               <button
                 type="button"
-                className="text-primary underline-offset-4 hover:underline"
+                className="text-primary hover:underline underline-offset-4"
                 onClick={() => {
                   setIsSignUp(!isSignUp);
                   setError(null);
@@ -126,8 +130,8 @@ export default function LoginPage() {
               </button>
             </p>
           </form>
-        </CardContent>
-      </Card>
+        </div>
+      </div>
     </div>
   );
 }
