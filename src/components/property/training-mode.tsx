@@ -90,29 +90,27 @@ export function TrainingMode({
   }
 
   return (
-    <div className="p-6 lg:p-8 max-w-4xl">
+    <div className="px-4 pb-6 lg:p-8 max-w-4xl">
       {/* Back */}
-      <Button
-        variant="ghost"
-        size="sm"
-        className="gap-1 text-muted-foreground mb-6"
+      <button
+        className="flex items-center gap-1 text-sm text-muted-foreground pt-4 mb-4 lg:mb-6"
         onClick={onBack}
       >
         <ArrowLeft className="h-4 w-4" /> Back to {propertyName}
-      </Button>
+      </button>
 
       {/* Header */}
-      <div className="mb-8">
+      <div className="mb-6 lg:mb-8">
         <div className="flex items-center gap-3 mb-2">
-          <div className="w-10 h-10 rounded-full bg-primary/10 flex items-center justify-center">
+          <div className="w-10 h-10 rounded-xl bg-primary/10 flex items-center justify-center shrink-0">
             <Zap className="h-5 w-5 text-primary" />
           </div>
           <div>
-            <h1 className="text-xl font-semibold text-foreground">
-              Train AI — {propertyName}
+            <h1 className="text-lg lg:text-xl font-semibold text-foreground">
+              Train AI
             </h1>
-            <p className="text-sm text-muted-foreground">
-              Upload photos or video of the property in its ideal state
+            <p className="text-xs lg:text-sm text-muted-foreground">
+              Upload photos or video in ideal state
             </p>
           </div>
         </div>
@@ -187,7 +185,7 @@ export function TrainingMode({
           <CardContent className="flex flex-col items-center justify-center py-16">
             <Loader2 className="h-12 w-12 text-primary animate-spin mb-4" />
             <p className="text-lg font-medium text-foreground mb-2">
-              AI is analyzing your media...
+              Analyzing your media
             </p>
             <p className="text-sm text-muted-foreground text-center max-w-md">
               Identifying rooms, cataloging items, and creating baseline references.
@@ -202,10 +200,10 @@ export function TrainingMode({
         <div className="space-y-6">
           <Card className="bg-green-500/5 border-green-500/20">
             <CardContent className="flex items-center gap-4 py-6">
-              <CheckCircle className="h-8 w-8 text-green-400 shrink-0" />
+              <CheckCircle className="h-8 w-8 text-green-600 shrink-0" />
               <div>
                 <p className="text-lg font-medium text-foreground">
-                  Training Complete!
+                  Training complete
                 </p>
                 <p className="text-sm text-muted-foreground">
                   Identified {result.totalRooms} room{result.totalRooms !== 1 ? "s" : ""} and{" "}

@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -12,6 +13,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { ArrowRight } from "lucide-react";
 
 interface AddPropertyDialogProps {
   open: boolean;
@@ -26,6 +28,7 @@ export function AddPropertyDialog({
 }: AddPropertyDialogProps) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const router = useRouter();
 
   async function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -35,14 +38,6 @@ export function AddPropertyDialog({
     const formData = new FormData(e.currentTarget);
     const data = {
       name: formData.get("name") as string,
-      address: formData.get("address") as string,
-      city: formData.get("city") as string,
-      state: formData.get("state") as string,
-      zipCode: formData.get("zipCode") as string,
-      propertyType: formData.get("propertyType") as string,
-      bedrooms: formData.get("bedrooms") as string,
-      bathrooms: formData.get("bathrooms") as string,
-      squareFeet: formData.get("squareFeet") as string,
       notes: formData.get("notes") as string,
     };
 
@@ -59,8 +54,10 @@ export function AddPropertyDialog({
         throw new Error(errBody || "Failed to create property");
       }
 
+      const property = await res.json();
       onOpenChange(false);
       onSuccess();
+      router.push(`/property/${property.id}?mode=training`);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Something went wrong");
     } finally {
@@ -73,11 +70,11 @@ export function AddPropertyDialog({
       if (isOpen) setError(null);
       onOpenChange(isOpen);
     }}>
-      <DialogContent className="max-w-lg">
+      <DialogContent className="max-w-sm">
         <DialogHeader>
-          <DialogTitle>Add Property</DialogTitle>
+          <DialogTitle>New Property</DialogTitle>
           <DialogDescription>
-            Add a new property to start creating baseline inspections.
+            Name your property, then upload photos to train the AI.
           </DialogDescription>
         </DialogHeader>
         <form onSubmit={handleSubmit} className="space-y-4">
@@ -92,77 +89,11 @@ export function AddPropertyDialog({
           </div>
 
           <div className="space-y-2">
-            <Label htmlFor="address">Address</Label>
-            <Input
-              id="address"
-              name="address"
-              placeholder="123 Main Street"
-            />
-          </div>
-
-          <div className="grid grid-cols-3 gap-3">
-            <div className="space-y-2">
-              <Label htmlFor="city">City</Label>
-              <Input id="city" name="city" placeholder="City" />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="state">State</Label>
-              <Input id="state" name="state" placeholder="State" />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="zipCode">Zip Code</Label>
-              <Input id="zipCode" name="zipCode" placeholder="Zip" />
-            </div>
-          </div>
-
-          <div className="space-y-2">
-            <Label htmlFor="propertyType">Property Type</Label>
-            <Input
-              id="propertyType"
-              name="propertyType"
-              placeholder="e.g. House, Condo, Cabin, Villa"
-            />
-          </div>
-
-          <div className="grid grid-cols-3 gap-3">
-            <div className="space-y-2">
-              <Label htmlFor="bedrooms">Bedrooms</Label>
-              <Input
-                id="bedrooms"
-                name="bedrooms"
-                type="number"
-                min="0"
-                placeholder="0"
-              />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="bathrooms">Bathrooms</Label>
-              <Input
-                id="bathrooms"
-                name="bathrooms"
-                type="number"
-                min="0"
-                placeholder="0"
-              />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="squareFeet">Sq Ft</Label>
-              <Input
-                id="squareFeet"
-                name="squareFeet"
-                type="number"
-                min="0"
-                placeholder="0"
-              />
-            </div>
-          </div>
-
-          <div className="space-y-2">
             <Label htmlFor="notes">Notes</Label>
             <Input
               id="notes"
               name="notes"
-              placeholder="Any additional notes about this property"
+              placeholder="Any additional notes"
             />
           </div>
 
@@ -176,8 +107,13 @@ export function AddPropertyDialog({
             >
               Cancel
             </Button>
-            <Button type="submit" disabled={loading}>
-              {loading ? "Creating..." : "Add Property"}
+            <Button type="submit" disabled={loading} className="gap-1.5">
+              {loading ? "Creating..." : (
+                <>
+                  Continue
+                  <ArrowRight className="h-4 w-4" />
+                </>
+              )}
             </Button>
           </DialogFooter>
         </form>

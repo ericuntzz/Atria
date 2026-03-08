@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getDbUser } from "@/lib/auth";
+import { getDbUser, isValidUUID, isSafeUrl } from "@/lib/auth";
 import { db } from "@/server/db";
 import {
   properties,
@@ -7,15 +7,21 @@ import {
   rooms,
   items,
   baselineImages,
+  baselineVersions,
 } from "@/server/schema";
 import { eq, and, inArray } from "drizzle-orm";
+import { emitEventSafe } from "@/lib/events/emit";
 
 // POST /api/properties/[id]/train - Analyze uploaded media with AI
 export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
+  try {
   const { id } = await params;
+  if (!isValidUUID(id)) {
+    return NextResponse.json({ error: "Not found" }, { status: 404 });
+  }
   const dbUser = await getDbUser();
   if (!dbUser) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
@@ -49,6 +55,24 @@ export async function POST(
       { error: "No media uploads provided" },
       { status: 400 },
     );
+  }
+
+  const MAX_UPLOAD_IDS = 100;
+  if (mediaUploadIds.length > MAX_UPLOAD_IDS) {
+    return NextResponse.json(
+      { error: `Too many uploads. Maximum is ${MAX_UPLOAD_IDS}` },
+      { status: 400 },
+    );
+  }
+
+  // Validate mediaUploadIds are valid UUIDs
+  for (const uploadId of mediaUploadIds) {
+    if (typeof uploadId !== "string" || !isValidUUID(uploadId)) {
+      return NextResponse.json(
+        { error: `Invalid upload ID: ${uploadId}` },
+        { status: 400 },
+      );
+    }
   }
 
   // Get uploaded media (verified to belong to this property)
@@ -92,17 +116,32 @@ export async function POST(
     // Create rooms and items from AI analysis
     const createdRooms = [];
 
+    // Validate AI analysis structure
+    const VALID_CONDITIONS = ["excellent", "good", "fair", "poor"];
+    const VALID_IMPORTANCES = ["critical", "high", "normal", "low"];
+
     for (let i = 0; i < analysis.rooms.length; i++) {
       const roomData = analysis.rooms[i];
+
+      // Validate room name from AI response
+      const roomName = typeof roomData.name === "string" && roomData.name.trim()
+        ? roomData.name.trim().slice(0, 200)
+        : `Room ${i + 1}`;
+      const roomDescription = typeof roomData.description === "string"
+        ? roomData.description.slice(0, 500)
+        : null;
+      const roomType = typeof (roomData.room_type || roomData.roomType) === "string"
+        ? (roomData.room_type || roomData.roomType).slice(0, 50)
+        : null;
 
       // Create room
       const [newRoom] = await db
         .insert(rooms)
         .values({
           propertyId: id,
-          name: roomData.name,
-          description: roomData.description || null,
-          roomType: roomData.room_type || roomData.roomType || null,
+          name: roomName,
+          description: roomDescription,
+          roomType: roomType,
           sortOrder: i,
         })
         .returning();
@@ -111,15 +150,26 @@ export async function POST(
       const roomItems = [];
       if (roomData.items && Array.isArray(roomData.items)) {
         for (const itemData of roomData.items) {
+          // Validate item name from AI response
+          const itemName = typeof itemData.name === "string" && itemData.name.trim()
+            ? itemData.name.trim().slice(0, 200)
+            : "Unknown Item";
+          const itemCondition = typeof itemData.condition === "string" && VALID_CONDITIONS.includes(itemData.condition)
+            ? itemData.condition
+            : "good";
+          const itemImportance = typeof itemData.importance === "string" && VALID_IMPORTANCES.includes(itemData.importance)
+            ? itemData.importance
+            : "normal";
+
           const [newItem] = await db
             .insert(items)
             .values({
               roomId: newRoom.id,
-              name: itemData.name,
-              category: itemData.category || null,
-              description: itemData.description || null,
-              condition: itemData.condition || "good",
-              importance: itemData.importance || "normal",
+              name: itemName,
+              category: typeof itemData.category === "string" ? itemData.category.slice(0, 100) : null,
+              description: typeof itemData.description === "string" ? itemData.description.slice(0, 500) : null,
+              condition: itemCondition,
+              importance: itemImportance,
             })
             .returning();
           roomItems.push({
@@ -134,6 +184,8 @@ export async function POST(
       let baselineCount = 0;
 
       for (const imgUrl of roomImageUrls) {
+        // Only insert valid string URLs from AI response
+        if (typeof imgUrl !== "string" || !imgUrl.trim()) continue;
         await db.insert(baselineImages).values({
           roomId: newRoom.id,
           imageUrl: imgUrl,
@@ -170,6 +222,51 @@ export async function POST(
       });
     }
 
+    // Create baseline version v1
+    const [baselineVersion] = await db
+      .insert(baselineVersions)
+      .values({
+        propertyId: id,
+        versionNumber: 1,
+        label: "Initial Training",
+        isActive: true,
+      })
+      .returning();
+
+    // Link all baseline images to this version and generate embeddings
+    // Batch-fetch all rooms + baselines for this property (fixes N+1)
+    const allPropertyRooms = await db
+      .select({ id: rooms.id })
+      .from(rooms)
+      .where(eq(rooms.propertyId, id));
+
+    const allRoomIds = allPropertyRooms.map((r) => r.id);
+    const allPropertyBaselines = allRoomIds.length > 0
+      ? await db
+          .select({ id: baselineImages.id, imageUrl: baselineImages.imageUrl })
+          .from(baselineImages)
+          .where(inArray(baselineImages.roomId, allRoomIds))
+      : [];
+
+    const allBaselineIds: string[] = [];
+    for (const bl of allPropertyBaselines) {
+      allBaselineIds.push(bl.id);
+
+      // Generate placeholder embedding + quality score
+      const embedding = generatePlaceholderEmbedding(bl.imageUrl);
+      const qualityScore = 150 + Math.random() * 100;
+
+      await db
+        .update(baselineImages)
+        .set({
+          baselineVersionId: baselineVersion.id,
+          embedding,
+          qualityScore,
+          embeddingModelVersion: "mobileclip-s0-placeholder-v1",
+        })
+        .where(eq(baselineImages.id, bl.id));
+    }
+
     // Set cover image and mark as trained
     await db
       .update(properties)
@@ -181,6 +278,34 @@ export async function POST(
       })
       .where(eq(properties.id, id));
 
+    // Emit events
+    await emitEventSafe({
+      eventType: "BaselineVersionCreated",
+      aggregateId: id,
+      propertyId: id,
+      userId: dbUser.id,
+      payload: {
+        versionId: baselineVersion.id,
+        versionNumber: 1,
+        label: "Initial Training",
+        baselineCount: allBaselineIds.length,
+        roomCount: createdRooms.length,
+      },
+    });
+
+    await emitEventSafe({
+      eventType: "PropertyCreated",
+      aggregateId: id,
+      propertyId: id,
+      userId: dbUser.id,
+      payload: {
+        propertyName: property.name,
+        roomCount: createdRooms.length,
+        totalItems: createdRooms.reduce((sum, r) => sum + r.items.length, 0),
+        baselineCount: allBaselineIds.length,
+      },
+    });
+
     const totalItems = createdRooms.reduce(
       (sum, r) => sum + r.items.length,
       0,
@@ -190,19 +315,35 @@ export async function POST(
       rooms: createdRooms,
       totalRooms: createdRooms.length,
       totalItems,
+      baselineVersion: {
+        id: baselineVersion.id,
+        versionNumber: 1,
+        label: "Initial Training",
+      },
     });
   } catch (err) {
     // Reset training status on error
-    await db
-      .update(properties)
-      .set({ trainingStatus: "untrained", updatedAt: new Date() })
-      .where(eq(properties.id, id));
+    try {
+      await db
+        .update(properties)
+        .set({ trainingStatus: "untrained", updatedAt: new Date() })
+        .where(eq(properties.id, id));
+    } catch (resetErr) {
+      console.error("[train] Failed to reset training status:", resetErr);
+    }
 
     return NextResponse.json(
       {
         error:
           err instanceof Error ? err.message : "Training failed unexpectedly",
       },
+      { status: 500 },
+    );
+  }
+  } catch (error) {
+    console.error("[train] POST error:", error);
+    return NextResponse.json(
+      { error: "Internal server error" },
       { status: 500 },
     );
   }
@@ -225,7 +366,11 @@ async function analyzePropertyImages(
 
     for (const url of imagesToAnalyze) {
       try {
-        const imgRes = await fetch(url);
+        if (!isSafeUrl(url)) {
+          console.warn("[train] Blocked unsafe URL:", url);
+          continue;
+        }
+        const imgRes = await fetch(url, { signal: AbortSignal.timeout(30000) });
         if (!imgRes.ok) continue;
         const buffer = await imgRes.arrayBuffer();
         const base64 = Buffer.from(buffer).toString("base64");
@@ -251,6 +396,7 @@ async function analyzePropertyImages(
 
     const res = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
+      signal: AbortSignal.timeout(120000), // 2 minute timeout for AI analysis
       headers: {
         "Content-Type": "application/json",
         "x-api-key": anthropicKey,
@@ -321,6 +467,34 @@ Analyze all images and group them by room. Be thorough — identify every signif
   } catch {
     return generateBasicStructure(imageUrls);
   }
+}
+
+/**
+ * Generate a deterministic 512-dim placeholder embedding from an image URL.
+ * Phase 2: Replace with actual MobileCLIP-S0 ONNX inference.
+ */
+function generatePlaceholderEmbedding(imageUrl: string): number[] {
+  const embedding = new Array(512);
+  let hash = 0;
+  for (let i = 0; i < imageUrl.length; i++) {
+    const char = imageUrl.charCodeAt(i);
+    hash = ((hash << 5) - hash + char) | 0;
+  }
+  for (let i = 0; i < 512; i++) {
+    hash = ((hash << 13) ^ hash) | 0;
+    hash = (hash * 0x5bd1e995) | 0;
+    hash = ((hash >> 15) ^ hash) | 0;
+    embedding[i] = (hash & 0xffff) / 0xffff - 0.5;
+  }
+  let norm = 0;
+  for (let i = 0; i < 512; i++) {
+    norm += embedding[i] * embedding[i];
+  }
+  norm = Math.sqrt(norm);
+  for (let i = 0; i < 512; i++) {
+    embedding[i] = embedding[i] / norm;
+  }
+  return embedding;
 }
 
 function generateBasicStructure(imageUrls: string[]): { rooms: any[] } {

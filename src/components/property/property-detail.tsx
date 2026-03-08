@@ -2,7 +2,9 @@
 
 import { useState, useEffect, useCallback } from "react";
 import type { User } from "@supabase/supabase-js";
+import { useSearchParams } from "next/navigation";
 import { AppLayout } from "@/components/layout/app-layout";
+import { MobileNav } from "@/components/layout/mobile-nav";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -23,6 +25,7 @@ import {
   CheckCircle,
   Package,
   AlertCircle,
+  ChevronLeft,
 } from "lucide-react";
 import Link from "next/link";
 import { TrainingMode } from "./training-mode";
@@ -82,7 +85,9 @@ export function PropertyDetail({
   const [rooms, setRooms] = useState<Room[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [viewMode, setViewMode] = useState<ViewMode>("overview");
+  const searchParams = useSearchParams();
+  const autoTrain = searchParams.get("mode") === "training";
+  const [viewMode, setViewMode] = useState<ViewMode>(autoTrain ? "training" : "overview");
   const router = useRouter();
 
   const fetchProperty = useCallback(async () => {
@@ -144,7 +149,7 @@ export function PropertyDetail({
 
   if (loading) {
     return (
-      <AppLayout userEmail={user.email || ""}>
+      <AppLayout userEmail={user.email || ""} mobileNav={<MobileNav />}>
         <div className="flex items-center justify-center h-full">
           <Loader2 className="h-8 w-8 text-primary animate-spin" />
         </div>
@@ -154,7 +159,7 @@ export function PropertyDetail({
 
   if (!property) {
     return (
-      <AppLayout userEmail={user.email || ""}>
+      <AppLayout userEmail={user.email || ""} mobileNav={<MobileNav />}>
         <div className="p-6">
           <p className="text-muted-foreground">
             {error || "Property not found."}
@@ -171,7 +176,7 @@ export function PropertyDetail({
 
   if (viewMode === "training") {
     return (
-      <AppLayout userEmail={user.email || ""}>
+      <AppLayout userEmail={user.email || ""} mobileNav={<MobileNav />}>
         <TrainingMode
           propertyId={propertyId}
           propertyName={property.name}
@@ -183,16 +188,55 @@ export function PropertyDetail({
   }
 
   return (
-    <AppLayout userEmail={user.email || ""}>
-      <div className="p-6 lg:p-8 max-w-7xl">
-        {/* Back + Header */}
-        <div className="mb-6">
+    <AppLayout userEmail={user.email || ""} mobileNav={<MobileNav />}>
+      <div className="px-4 pb-6 lg:p-8 max-w-7xl">
+        {/* Mobile back + header */}
+        <div className="lg:hidden pt-4 pb-3">
+          <Link href="/dashboard">
+            <button className="flex items-center gap-1 text-sm text-muted-foreground mb-3">
+              <ChevronLeft className="h-4 w-4" /> Properties
+            </button>
+          </Link>
+          <h1 className="text-xl font-semibold text-foreground">{property.name}</h1>
+          {(property.address || property.city) && (
+            <p className="text-xs text-muted-foreground flex items-center gap-1 mt-1">
+              <MapPin className="h-3 w-3" />
+              {[property.address, property.city, property.state]
+                .filter(Boolean)
+                .join(", ")}
+            </p>
+          )}
+          {/* Mobile action buttons */}
+          <div className="flex gap-2 mt-4">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setViewMode("training")}
+              className="gap-1.5 flex-1 rounded-xl h-10"
+            >
+              <Upload className="h-4 w-4" />
+              {property.trainingStatus === "trained" ? "Retrain" : "Train AI"}
+            </Button>
+            {property.trainingStatus === "trained" && (
+              <Button
+                size="sm"
+                onClick={handleStartInspection}
+                className="gap-1.5 flex-1 rounded-xl h-10"
+              >
+                <Eye className="h-4 w-4" />
+                Inspect
+              </Button>
+            )}
+          </div>
+        </div>
+
+        {/* Desktop header */}
+        <div className="hidden lg:block mb-6">
           <Link href="/dashboard">
             <Button variant="ghost" size="sm" className="gap-1 text-muted-foreground mb-4">
               <ArrowLeft className="h-4 w-4" /> Properties
             </Button>
           </Link>
-
           <div className="flex items-start justify-between">
             <div>
               <h1 className="text-2xl font-semibold text-foreground">
@@ -228,16 +272,14 @@ export function PropertyDetail({
 
         {/* Error banner */}
         {error && (
-          <Card className="bg-destructive/5 border-destructive/20 mb-6">
-            <CardContent className="flex items-center gap-3 py-3">
-              <AlertCircle className="h-4 w-4 text-destructive shrink-0" />
-              <p className="text-sm text-foreground">{error}</p>
-            </CardContent>
-          </Card>
+          <div className="flex items-center gap-3 rounded-xl bg-destructive/5 border border-destructive/20 px-4 py-3 mb-5">
+            <AlertCircle className="h-4 w-4 text-destructive shrink-0" />
+            <p className="text-sm text-foreground">{error}</p>
+          </div>
         )}
 
-        {/* Property info cards */}
-        <div className="grid gap-4 sm:grid-cols-4 mb-8">
+        {/* Property info cards — 2x2 on mobile, 4 cols desktop */}
+        <div className="grid grid-cols-2 gap-3 lg:grid-cols-4 lg:gap-4 mb-6 lg:mb-8">
           <InfoCard label="Type" value={property.propertyType || "—"} icon={Home} />
           <InfoCard
             label="Size"
@@ -265,63 +307,73 @@ export function PropertyDetail({
 
         {/* Untrained prompt */}
         {property.trainingStatus !== "trained" && (
-          <Card className="bg-primary/5 border-primary/20 mb-8">
-            <CardContent className="flex items-center gap-4 py-6">
-              <div className="w-10 h-10 rounded-full bg-primary/10 flex items-center justify-center shrink-0">
-                <Zap className="h-5 w-5 text-primary" />
-              </div>
-              <div className="flex-1">
-                <p className="text-sm font-medium text-foreground">
-                  Train the AI on this property
-                </p>
-                <p className="text-xs text-muted-foreground mt-0.5">
-                  Upload photos or video of each room in its ideal state. The AI will automatically
-                  identify rooms, categorize items, and create baseline references for future inspections.
-                </p>
-              </div>
-              <Button onClick={() => setViewMode("training")} size="sm" className="gap-2 shrink-0">
-                <Upload className="h-4 w-4" />
-                Start Training
-              </Button>
-            </CardContent>
-          </Card>
+          <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4 rounded-2xl bg-primary/5 border border-primary/20 p-4 mb-6 lg:mb-8">
+            <div className="w-10 h-10 rounded-xl bg-primary/10 flex items-center justify-center shrink-0">
+              <Zap className="h-5 w-5 text-primary" />
+            </div>
+            <div className="flex-1">
+              <p className="text-sm font-medium text-foreground">
+                Train the AI on this property
+              </p>
+              <p className="text-xs text-muted-foreground mt-0.5">
+                Upload photos or video of each room in its ideal state.
+              </p>
+            </div>
+            <Button onClick={() => setViewMode("training")} size="sm" className="gap-2 shrink-0 rounded-xl">
+              <Upload className="h-4 w-4" />
+              Start Training
+            </Button>
+          </div>
         )}
 
-        {/* Rooms grid */}
+        {/* Rooms */}
         {rooms.length > 0 ? (
           <div>
-            <h2 className="text-lg font-semibold text-foreground mb-4">
+            <h2 className="text-base font-semibold text-foreground mb-3 lg:text-lg lg:mb-4">
               Rooms ({rooms.length})
             </h2>
-            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+
+            {/* Mobile: compact list */}
+            <div className="space-y-2.5 lg:hidden">
+              {rooms.map((room) => (
+                <div key={room.id} className="flex items-center gap-3 p-3 rounded-2xl bg-card border border-border">
+                  <div className="h-12 w-12 rounded-xl bg-secondary flex items-center justify-center overflow-hidden shrink-0">
+                    {room.coverImageUrl ? (
+                      <img src={room.coverImageUrl} alt={room.name} className="w-full h-full object-cover" />
+                    ) : room.baselineImages.length > 0 ? (
+                      <img src={room.baselineImages[0].imageUrl} alt={room.name} className="w-full h-full object-cover" />
+                    ) : (
+                      <Camera className="h-5 w-5 text-muted-foreground" />
+                    )}
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-medium text-foreground truncate">{room.name}</p>
+                    <div className="flex gap-3 text-[11px] text-muted-foreground mt-0.5">
+                      <span>{room.baselineImages.length} baselines</span>
+                      <span>{room.items.length} items</span>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            {/* Desktop: grid cards */}
+            <div className="hidden lg:grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
               {rooms.map((room) => (
                 <Card key={room.id} className="bg-card border-border">
-                  {/* Room cover */}
                   <div className="h-32 bg-secondary rounded-t-lg flex items-center justify-center overflow-hidden">
                     {room.coverImageUrl ? (
-                      <img
-                        src={room.coverImageUrl}
-                        alt={room.name}
-                        className="w-full h-full object-cover"
-                      />
+                      <img src={room.coverImageUrl} alt={room.name} className="w-full h-full object-cover" />
                     ) : room.baselineImages.length > 0 ? (
-                      <img
-                        src={room.baselineImages[0].imageUrl}
-                        alt={room.name}
-                        className="w-full h-full object-cover"
-                      />
+                      <img src={room.baselineImages[0].imageUrl} alt={room.name} className="w-full h-full object-cover" />
                     ) : (
                       <Camera className="h-6 w-6 text-muted-foreground" />
                     )}
                   </div>
                   <CardHeader className="pb-2">
-                    <CardTitle className="text-base text-foreground">
-                      {room.name}
-                    </CardTitle>
+                    <CardTitle className="text-base text-foreground">{room.name}</CardTitle>
                     {room.roomType && (
-                      <CardDescription className="capitalize text-muted-foreground">
-                        {room.roomType}
-                      </CardDescription>
+                      <CardDescription className="capitalize text-muted-foreground">{room.roomType}</CardDescription>
                     )}
                   </CardHeader>
                   <CardContent>
@@ -338,10 +390,7 @@ export function PropertyDetail({
                     {room.items.length > 0 && (
                       <div className="mt-3 flex flex-wrap gap-1.5">
                         {room.items.slice(0, 5).map((item) => (
-                          <span
-                            key={item.id}
-                            className="text-xs px-2 py-0.5 rounded-full bg-secondary text-muted-foreground"
-                          >
+                          <span key={item.id} className="text-xs px-2 py-0.5 rounded-full bg-secondary text-muted-foreground">
                             {item.name}
                           </span>
                         ))}
@@ -358,14 +407,12 @@ export function PropertyDetail({
             </div>
           </div>
         ) : property.trainingStatus === "trained" ? (
-          <Card className="bg-card border-border">
-            <CardContent className="py-12 text-center">
-              <CheckCircle className="h-8 w-8 text-green-400 mx-auto mb-3" />
-              <p className="text-sm text-muted-foreground">
-                Property is trained but no rooms were detected. Try retraining with more photos.
-              </p>
-            </CardContent>
-          </Card>
+          <div className="py-12 text-center rounded-2xl bg-card border border-border">
+            <CheckCircle className="h-8 w-8 text-green-600 mx-auto mb-3" />
+            <p className="text-sm text-muted-foreground">
+              Property is trained but no rooms were detected. Try retraining with more photos.
+            </p>
+          </div>
         ) : null}
       </div>
     </AppLayout>
@@ -384,16 +431,16 @@ function InfoCard({
   highlight?: boolean;
 }) {
   return (
-    <Card className="bg-card border-border">
-      <CardContent className="py-4">
-        <div className="flex items-center justify-between mb-1">
-          <span className="text-xs text-muted-foreground">{label}</span>
-          <Icon className={`h-4 w-4 ${highlight ? "text-primary" : "text-muted-foreground"}`} />
+    <div className="rounded-2xl bg-card border border-border p-3.5 lg:p-4">
+      <div className="flex items-center justify-between mb-1.5">
+        <span className="text-[11px] lg:text-xs text-muted-foreground">{label}</span>
+        <div className={`h-6 w-6 lg:h-7 lg:w-7 rounded-lg flex items-center justify-center ${highlight ? "bg-primary/10" : "bg-secondary"}`}>
+          <Icon className={`h-3.5 w-3.5 ${highlight ? "text-primary" : "text-muted-foreground"}`} />
         </div>
-        <p className={`text-sm font-medium ${highlight ? "text-primary" : "text-foreground"}`}>
-          {value}
-        </p>
-      </CardContent>
-    </Card>
+      </div>
+      <p className={`text-sm font-semibold font-mono ${highlight ? "text-primary" : "text-foreground"}`}>
+        {value}
+      </p>
+    </div>
   );
 }

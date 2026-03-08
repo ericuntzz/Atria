@@ -30,7 +30,7 @@ interface FileWithPreview {
 export function MediaUpload({
   propertyId,
   onUploadComplete,
-  accept = "image/*,video/*",
+  accept = "image/*,video/*,.heic,.heif",
   maxFiles = 50,
 }: MediaUploadProps) {
   const [files, setFiles] = useState<FileWithPreview[]>([]);
@@ -270,7 +270,7 @@ export function MediaUpload({
                   )}
                   {f.status === "complete" && (
                     <div className="absolute top-1 right-1">
-                      <CheckCircle className="h-5 w-5 text-green-400" />
+                      <CheckCircle className="h-5 w-5 text-green-600" />
                     </div>
                   )}
                   {f.status === "error" && (

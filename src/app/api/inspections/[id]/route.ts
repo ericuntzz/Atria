@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getDbUser } from "@/lib/auth";
+import { getDbUser, isValidUUID, isSafeUrl } from "@/lib/auth";
 import { db } from "@/server/db";
 import {
   inspections,
@@ -8,69 +8,88 @@ import {
   baselineImages,
   properties,
 } from "@/server/schema";
-import { eq, and } from "drizzle-orm";
+import { eq, and, inArray } from "drizzle-orm";
+import { compareImages } from "@/lib/vision/compare";
 
 // GET /api/inspections/[id] - Get inspection details with rooms
 export async function GET(
   _request: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
-  const { id } = await params;
-  const dbUser = await getDbUser();
-  if (!dbUser) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
+  try {
+    const { id } = await params;
+    if (!isValidUUID(id)) {
+      return NextResponse.json({ error: "Not found" }, { status: 404 });
+    }
+    const dbUser = await getDbUser();
+    if (!dbUser) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
 
-  const [inspection] = await db
-    .select()
-    .from(inspections)
-    .where(
-      and(eq(inspections.id, id), eq(inspections.inspectorId, dbUser.id)),
-    );
+    const [inspection] = await db
+      .select()
+      .from(inspections)
+      .where(
+        and(eq(inspections.id, id), eq(inspections.inspectorId, dbUser.id)),
+      );
 
-  if (!inspection) {
+    if (!inspection) {
+      return NextResponse.json(
+        { error: "Inspection not found" },
+        { status: 404 },
+      );
+    }
+
+    // Get property info
+    const [property] = await db
+      .select()
+      .from(properties)
+      .where(eq(properties.id, inspection.propertyId));
+
+    // Get rooms for this property
+    const propertyRooms = await db
+      .select()
+      .from(rooms)
+      .where(eq(rooms.propertyId, inspection.propertyId))
+      .orderBy(rooms.sortOrder);
+
+    // Batch-fetch all baselines for all rooms in one query (fixes N+1)
+    const roomIds = propertyRooms.map((r) => r.id);
+    const allBaselines = roomIds.length > 0
+      ? await db.select().from(baselineImages).where(inArray(baselineImages.roomId, roomIds))
+      : [];
+
+    const baselinesByRoom = new Map<string, typeof allBaselines>();
+    for (const bl of allBaselines) {
+      const list = baselinesByRoom.get(bl.roomId) || [];
+      list.push(bl);
+      baselinesByRoom.set(bl.roomId, list);
+    }
+
+    const roomsWithBaselines = propertyRooms.map((room) => ({
+      ...room,
+      baselineImages: baselinesByRoom.get(room.id) || [],
+    }));
+
+    // Get existing results
+    const results = await db
+      .select()
+      .from(inspectionResults)
+      .where(eq(inspectionResults.inspectionId, id));
+
+    return NextResponse.json({
+      ...inspection,
+      property,
+      rooms: roomsWithBaselines,
+      results,
+    });
+  } catch (error) {
+    console.error("[inspections/[id]] GET error:", error);
     return NextResponse.json(
-      { error: "Inspection not found" },
-      { status: 404 },
+      { error: "Internal server error" },
+      { status: 500 },
     );
   }
-
-  // Get property info
-  const [property] = await db
-    .select()
-    .from(properties)
-    .where(eq(properties.id, inspection.propertyId));
-
-  // Get rooms with baselines
-  const propertyRooms = await db
-    .select()
-    .from(rooms)
-    .where(eq(rooms.propertyId, inspection.propertyId))
-    .orderBy(rooms.sortOrder);
-
-  const roomsWithBaselines = await Promise.all(
-    propertyRooms.map(async (room) => {
-      const baselines = await db
-        .select()
-        .from(baselineImages)
-        .where(eq(baselineImages.roomId, room.id));
-
-      return { ...room, baselineImages: baselines };
-    }),
-  );
-
-  // Get existing results
-  const results = await db
-    .select()
-    .from(inspectionResults)
-    .where(eq(inspectionResults.inspectionId, id));
-
-  return NextResponse.json({
-    ...inspection,
-    property,
-    rooms: roomsWithBaselines,
-    results,
-  });
 }
 
 // POST /api/inspections/[id] - Submit room comparison for inspection
@@ -78,241 +97,140 @@ export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
-  const { id } = await params;
-  const dbUser = await getDbUser();
-  if (!dbUser) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
-
-  const [inspection] = await db
-    .select()
-    .from(inspections)
-    .where(
-      and(eq(inspections.id, id), eq(inspections.inspectorId, dbUser.id)),
-    );
-
-  if (!inspection) {
-    return NextResponse.json(
-      { error: "Inspection not found" },
-      { status: 404 },
-    );
-  }
-
-  let body: Record<string, unknown>;
   try {
-    body = await request.json();
-  } catch {
-    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
-  }
-
-  const { roomId, baselineImageId, currentImageUrl } = body;
-
-  if (!roomId || !baselineImageId || !currentImageUrl) {
-    return NextResponse.json(
-      { error: "roomId, baselineImageId, and currentImageUrl are required" },
-      { status: 400 },
-    );
-  }
-
-  // Verify room belongs to the inspection's property
-  const [room] = await db
-    .select()
-    .from(rooms)
-    .where(
-      and(
-        eq(rooms.id, roomId as string),
-        eq(rooms.propertyId, inspection.propertyId),
-      ),
-    );
-
-  if (!room) {
-    return NextResponse.json(
-      { error: "Room not found for this property" },
-      { status: 404 },
-    );
-  }
-
-  // Get baseline info
-  const [baseline] = await db
-    .select()
-    .from(baselineImages)
-    .where(eq(baselineImages.id, baselineImageId as string));
-
-  if (!baseline) {
-    return NextResponse.json(
-      { error: "Baseline image not found" },
-      { status: 404 },
-    );
-  }
-
-  // Compare images with Claude Vision API
-  const comparisonResult = await compareImages(
-    baseline.imageUrl,
-    currentImageUrl as string,
-    room.name,
-  );
-  const findings = comparisonResult.findings || [];
-  const score = comparisonResult.readiness_score ?? 100;
-  const rawResponse = JSON.stringify(comparisonResult);
-
-  const hasCritical = findings.some(
-    (f: any) => f.severity === "critical" || f.severity === "high",
-  );
-
-  const [result] = await db
-    .insert(inspectionResults)
-    .values({
-      inspectionId: id,
-      roomId: roomId as string,
-      baselineImageId: baselineImageId as string,
-      currentImageUrl: currentImageUrl as string,
-      status:
-        findings.length === 0 ? "passed" : hasCritical ? "flagged" : "flagged",
-      score,
-      findings,
-      rawResponse,
-    })
-    .returning();
-
-  return NextResponse.json(result, { status: 201 });
-}
-
-async function compareImages(
-  baselineUrl: string,
-  currentUrl: string,
-  roomName: string,
-): Promise<any> {
-  const anthropicKey = process.env.ANTHROPIC_API_KEY;
-
-  if (!anthropicKey) {
-    return { findings: [], readiness_score: 100, summary: "AI unavailable" };
-  }
-
-  try {
-    // Fetch both images with error checking
-    const [baseRes, currRes] = await Promise.all([
-      fetch(baselineUrl),
-      fetch(currentUrl),
-    ]);
-
-    if (!baseRes.ok || !currRes.ok) {
-      return {
-        findings: [],
-        readiness_score: 100,
-        summary: "Failed to fetch images",
-      };
+    const { id } = await params;
+    if (!isValidUUID(id)) {
+      return NextResponse.json({ error: "Not found" }, { status: 404 });
+    }
+    const dbUser = await getDbUser();
+    if (!dbUser) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
-    const baseContentType =
-      baseRes.headers.get("content-type")?.split(";")[0].trim() ||
-      "image/jpeg";
-    const currContentType =
-      currRes.headers.get("content-type")?.split(";")[0].trim() ||
-      "image/jpeg";
+    const [inspection] = await db
+      .select()
+      .from(inspections)
+      .where(
+        and(eq(inspections.id, id), eq(inspections.inspectorId, dbUser.id)),
+      );
 
-    const [baseImg, currImg] = await Promise.all([
-      baseRes.arrayBuffer(),
-      currRes.arrayBuffer(),
-    ]);
-
-    const baseB64 = Buffer.from(baseImg).toString("base64");
-    const currB64 = Buffer.from(currImg).toString("base64");
-
-    const res = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": anthropicKey,
-        "anthropic-version": "2023-06-01",
-      },
-      body: JSON.stringify({
-        model: "claude-sonnet-4-5-20250514",
-        max_tokens: 4096,
-        messages: [
-          {
-            role: "user",
-            content: [
-              {
-                type: "text",
-                text: `BASELINE IMAGE (how "${roomName}" should look):`,
-              },
-              {
-                type: "image",
-                source: {
-                  type: "base64",
-                  media_type: baseContentType,
-                  data: baseB64,
-                },
-              },
-              {
-                type: "text",
-                text: `CURRENT IMAGE (how "${roomName}" looks now):`,
-              },
-              {
-                type: "image",
-                source: {
-                  type: "base64",
-                  media_type: currContentType,
-                  data: currB64,
-                },
-              },
-              {
-                type: "text",
-                text: `Compare these images and identify discrepancies. Return ONLY valid JSON:
-{
-  "findings": [
-    {
-      "category": "missing|moved|cleanliness|damage|inventory",
-      "description": "Specific description",
-      "severity": "low|medium|high|critical",
-      "confidence": 0.0-1.0
-    }
-  ],
-  "summary": "Brief assessment",
-  "readiness_score": 0-100
-}
-If the room looks perfect, return empty findings and score 100.`,
-              },
-            ],
-          },
-        ],
-      }),
-    });
-
-    if (!res.ok) {
-      return {
-        findings: [],
-        readiness_score: 100,
-        summary: "Comparison unavailable",
-      };
+    if (!inspection) {
+      return NextResponse.json(
+        { error: "Inspection not found" },
+        { status: 404 },
+      );
     }
 
-    const data = await res.json();
-    const rawText = data.content?.[0]?.text;
-
-    if (!rawText) {
-      return {
-        findings: [],
-        readiness_score: 100,
-        summary: "Empty AI response",
-      };
-    }
-
+    let body: Record<string, unknown>;
     try {
-      return JSON.parse(rawText);
+      body = await request.json();
     } catch {
-      const start = rawText.indexOf("{");
-      const end = rawText.lastIndexOf("}") + 1;
-      if (start !== -1 && end > start) {
-        return JSON.parse(rawText.substring(start, end));
-      }
-      return { findings: [], readiness_score: 100, summary: "Parse error" };
+      return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
     }
-  } catch {
-    return {
-      findings: [],
-      readiness_score: 100,
-      summary: "Comparison failed",
-    };
+
+    const { roomId, baselineImageId, currentImageUrl } = body;
+
+    if (!roomId || !baselineImageId || !currentImageUrl) {
+      return NextResponse.json(
+        { error: "roomId, baselineImageId, and currentImageUrl are required" },
+        { status: 400 },
+      );
+    }
+
+    // Validate types and formats
+    if (typeof roomId !== "string" || !isValidUUID(roomId)) {
+      return NextResponse.json(
+        { error: "Invalid roomId format" },
+        { status: 400 },
+      );
+    }
+
+    if (typeof baselineImageId !== "string" || !isValidUUID(baselineImageId)) {
+      return NextResponse.json(
+        { error: "Invalid baselineImageId format" },
+        { status: 400 },
+      );
+    }
+
+    if (typeof currentImageUrl !== "string" || !isSafeUrl(currentImageUrl)) {
+      return NextResponse.json(
+        { error: "Invalid or unsafe image URL" },
+        { status: 400 },
+      );
+    }
+
+    // Verify room belongs to the inspection's property
+    const [room] = await db
+      .select()
+      .from(rooms)
+      .where(
+        and(
+          eq(rooms.id, roomId),
+          eq(rooms.propertyId, inspection.propertyId),
+        ),
+      );
+
+    if (!room) {
+      return NextResponse.json(
+        { error: "Room not found for this property" },
+        { status: 404 },
+      );
+    }
+
+    // Get baseline info — verify it belongs to the same room
+    const [baseline] = await db
+      .select()
+      .from(baselineImages)
+      .where(
+        and(
+          eq(baselineImages.id, baselineImageId),
+          eq(baselineImages.roomId, roomId),
+        ),
+      );
+
+    if (!baseline) {
+      return NextResponse.json(
+        { error: "Baseline image not found for this room" },
+        { status: 404 },
+      );
+    }
+
+    // Compare images with Claude Vision API
+    const comparisonResult = await compareImages({
+      baselineImage: baseline.imageUrl,
+      currentImages: [currentImageUrl],
+      roomName: room.name,
+    });
+    const findings = comparisonResult.findings || [];
+    const score = comparisonResult.readiness_score ?? 100;
+    const rawResponse = JSON.stringify(comparisonResult);
+
+    const hasCritical = findings.some(
+      (f) => f.severity === "urgent_repair" || f.severity === "safety" || f.severity === "guest_damage",
+    );
+
+    // Store full ComparisonFinding data as JSON
+    const [result] = await db
+      .insert(inspectionResults)
+      .values({
+        inspectionId: id,
+        roomId,
+        baselineImageId,
+        currentImageUrl,
+        status:
+          findings.length === 0 ? "passed" : hasCritical ? "flagged" : "warning",
+        score,
+        findings,
+        rawResponse,
+      })
+      .returning();
+
+    return NextResponse.json(result, { status: 201 });
+  } catch (error) {
+    console.error("[inspections/[id]] POST error:", error);
+    return NextResponse.json(
+      { error: "Internal server error" },
+      { status: 500 },
+    );
   }
 }

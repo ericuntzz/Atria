@@ -30,6 +30,7 @@
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "drizzle-orm": "^0.44.7",
+    "geist": "^1.7.0",
     "lucide-react": "^0.487.0",
     "next": "~15.5.12",
     "postgres": "^3.4.8",

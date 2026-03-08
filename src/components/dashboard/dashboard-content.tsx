@@ -102,11 +102,11 @@ export function DashboardContent({ user }: { user: User }) {
         subtitle="Manage your inspections"
       />
 
-      <div className="px-4 pb-6 lg:p-8 max-w-7xl">
+      <div className="px-4 pb-6 lg:p-8 max-w-[1280px] mx-auto">
         {/* Desktop header — hidden on mobile */}
         <div className="hidden lg:flex mb-8 items-center justify-between">
           <div>
-            <h1 className="text-2xl font-semibold text-foreground">Properties</h1>
+            <h1 className="text-2xl font-semibold text-heading">Properties</h1>
             <p className="text-muted-foreground text-sm mt-1">
               Manage your luxury property inspections
             </p>
@@ -207,7 +207,7 @@ function StatCard({
           {icon}
         </div>
       </div>
-      <div className="text-2xl font-bold text-foreground">{value}</div>
+      <div className="text-2xl font-semibold font-mono text-foreground">{value}</div>
       <p className="text-[11px] text-muted-foreground">{sub}</p>
     </div>
   );
@@ -337,7 +337,7 @@ function EmptyState({ onAdd }: { onAdd: () => void }) {
 function TrainingBadge({ status }: { status: string | null }) {
   if (status === "trained") {
     return (
-      <span className="text-[10px] px-2 py-0.5 rounded-full bg-green-500/10 text-green-400 border border-green-500/20 whitespace-nowrap">
+      <span className="text-[10px] px-2 py-0.5 rounded-full bg-success/10 text-green-600 border border-green-500/20 whitespace-nowrap">
         Trained
       </span>
     );

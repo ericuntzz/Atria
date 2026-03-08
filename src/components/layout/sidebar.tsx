@@ -35,16 +35,16 @@ export function Sidebar({ userEmail }: SidebarProps) {
   return (
     <aside
       className={`flex flex-col bg-sidebar border-r border-sidebar-border transition-all duration-200 ${
-        collapsed ? "w-16" : "w-56"
+        collapsed ? "w-16" : "w-60"
       }`}
     >
       {/* Logo */}
       <div className="flex items-center gap-2 px-4 h-14 border-b border-sidebar-border">
-        <div className="flex items-center justify-center w-8 h-8 rounded-lg bg-primary/10">
-          <Eye className="h-5 w-5 text-primary" />
+        <div className="flex items-center justify-center w-8 h-8 rounded-lg bg-white/10">
+          <Eye className="h-5 w-5 text-white" />
         </div>
         {!collapsed && (
-          <span className="text-foreground font-semibold text-base">Atria</span>
+          <span className="text-white font-semibold text-base">Atria</span>
         )}
       </div>
 
