@@ -275,7 +275,7 @@ function PropertiesTab({
         <StatCard
           label="Inspections"
           value={inspectionCount ?? "--"}
-          sub="Completed"
+          sub="Total"
           icon={<ClipboardCheck className="h-4 w-4 text-primary" />}
         />
       </div>

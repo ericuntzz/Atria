@@ -234,7 +234,7 @@ export async function compareImages(
       baselineData = fetched;
     }
 
-    // Prepare current image(s)
+    // Prepare current image(s) — skip individual fetch failures instead of aborting
     const currentData: { base64: string; mediaType: string }[] = [];
     for (const img of currentImages) {
       if (currentInputAreBase64) {
@@ -245,10 +245,15 @@ export async function compareImages(
       } else {
         const fetched = await fetchImageAsBase64(img);
         if (!fetched) {
-          return { ...EMPTY_RESULT, summary: "Failed to fetch current image" };
+          console.warn(`[compare] Skipping current image that failed to fetch: ${img.slice(0, 120)}`);
+          continue;
         }
         currentData.push(fetched);
       }
+    }
+
+    if (currentData.length === 0) {
+      return { ...EMPTY_RESULT, summary: "Failed to fetch any current images" };
     }
 
     // Run preflight alignment + perceptual gate on baseline vs first current frame.

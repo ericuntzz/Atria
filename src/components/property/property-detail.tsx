@@ -31,6 +31,7 @@ import {
   ImagePlus,
 } from "lucide-react";
 import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import {
   Dialog,
@@ -557,15 +558,15 @@ export function PropertyDetail({
           <div className="space-y-4">
             <div className="space-y-2">
               <Label htmlFor="edit-name">Property Name *</Label>
-              <Input id="edit-name" value={editName} onChange={(e) => setEditName(e.target.value)} required />
+              <Input id="edit-name" value={editName} onChange={(e) => setEditName(e.target.value)} maxLength={200} required />
             </div>
             <div className="space-y-2">
               <Label htmlFor="edit-address">Address</Label>
-              <Input id="edit-address" value={editAddress} onChange={(e) => setEditAddress(e.target.value)} placeholder="123 Main St, City, State" />
+              <Input id="edit-address" value={editAddress} onChange={(e) => setEditAddress(e.target.value)} maxLength={200} placeholder="123 Main St, City, State" />
             </div>
             <div className="space-y-2">
               <Label htmlFor="edit-notes">Notes</Label>
-              <Input id="edit-notes" value={editNotes} onChange={(e) => setEditNotes(e.target.value)} placeholder="Any additional notes" />
+              <Textarea id="edit-notes" value={editNotes} onChange={(e) => setEditNotes(e.target.value)} rows={3} maxLength={500} placeholder="Any additional notes" />
             </div>
           </div>
           <DialogFooter>

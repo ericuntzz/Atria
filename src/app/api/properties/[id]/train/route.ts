@@ -205,6 +205,21 @@ export async function POST(
     const rawAnalysis = await analyzePropertyImages(imageUrls, property.name);
     const analysis = normalizeAnalysis(rawAnalysis, imageUrls);
 
+    // Clean up existing rooms/baselines/versions from previous training
+    // FK cascades: deleting rooms → auto-deletes items + baselineImages
+    const existingRooms = await db
+      .select({ id: rooms.id })
+      .from(rooms)
+      .where(eq(rooms.propertyId, id));
+
+    if (existingRooms.length > 0) {
+      console.info(`[train] Cleaning up ${existingRooms.length} existing rooms for re-training`);
+      await db.delete(rooms).where(eq(rooms.propertyId, id));
+    }
+
+    // Clean up existing baseline versions (cascade deletes linked baseline images)
+    await db.delete(baselineVersions).where(eq(baselineVersions.propertyId, id));
+
     // Create rooms and items from AI analysis
     const createdRooms = [];
 
@@ -346,25 +361,44 @@ export async function POST(
           .where(inArray(baselineImages.roomId, allRoomIds))
       : [];
 
-    const allBaselineIds: string[] = [];
-    for (const bl of allPropertyBaselines) {
-      allBaselineIds.push(bl.id);
+    const allBaselineIds: string[] = allPropertyBaselines.map((bl) => bl.id);
 
-      // Generate embedding + quality score
-      const embedding = await generateEmbeddingWithOptions(bl.imageUrl, {
-        allowPlaceholder: ALLOW_PLACEHOLDER_EMBEDDINGS,
-      });
-      const qualityScore = await computeQualityScore(bl.imageUrl);
+    // Process embeddings + quality scores in parallel (concurrency-limited)
+    const EMBEDDING_CONCURRENCY = 3;
+    let embeddingFailures = 0;
 
-      await db
-        .update(baselineImages)
-        .set({
-          baselineVersionId: baselineVersion.id,
-          embedding,
-          qualityScore,
-          embeddingModelVersion: getModelVersion(),
-        })
-        .where(eq(baselineImages.id, bl.id));
+    for (let i = 0; i < allPropertyBaselines.length; i += EMBEDDING_CONCURRENCY) {
+      const batch = allPropertyBaselines.slice(i, i + EMBEDDING_CONCURRENCY);
+      const results = await Promise.allSettled(
+        batch.map(async (bl) => {
+          const [embedding, qualityScore] = await Promise.all([
+            generateEmbeddingWithOptions(bl.imageUrl, {
+              allowPlaceholder: ALLOW_PLACEHOLDER_EMBEDDINGS,
+            }),
+            computeQualityScore(bl.imageUrl),
+          ]);
+          await db
+            .update(baselineImages)
+            .set({
+              baselineVersionId: baselineVersion.id,
+              embedding,
+              qualityScore,
+              embeddingModelVersion: getModelVersion(),
+            })
+            .where(eq(baselineImages.id, bl.id));
+        }),
+      );
+
+      for (const result of results) {
+        if (result.status === "rejected") {
+          embeddingFailures++;
+          console.warn("[train] Embedding generation failed for one baseline:", result.reason);
+        }
+      }
+    }
+
+    if (embeddingFailures > 0) {
+      console.warn(`[train] ${embeddingFailures}/${allPropertyBaselines.length} baselines failed embedding generation`);
     }
 
     // Set cover image and mark as trained
