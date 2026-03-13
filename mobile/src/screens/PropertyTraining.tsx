@@ -159,6 +159,7 @@ export default function PropertyTrainingScreen() {
   const [phase, setPhase] = useState<TrainingPhase>("intro");
   const [captures, setCaptures] = useState<CapturedMedia[]>([]);
   const [captureMode, setCaptureMode] = useState<CaptureMode>("photo");
+  const [isAddMore, setIsAddMore] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
   const [zoom, setZoom] = useState(0);
   const [uploadProgress, setUploadProgress] = useState({ current: 0, total: 0 });
@@ -695,10 +696,18 @@ export default function PropertyTrainingScreen() {
   }, [captures, extractVideoKeyframeUris, isRunActive, propertyId]);
 
   const handleDoneCapturing = useCallback(() => {
-    if (captures.length < 3) {
+    const hasVideosWithKeyframes =
+      videoThumbnailsRef.current &&
+      captures.some((c) => c.type === "video");
+    // Add More: 1 capture minimum. Initial: 3, unless a video will produce keyframes
+    const minCaptures = isAddMore ? 1 : hasVideosWithKeyframes ? 1 : 3;
+
+    if (captures.length < minCaptures) {
       Alert.alert(
         "More Images Needed",
-        "Please capture at least 3 images from different rooms and angles for accurate training.",
+        isAddMore
+          ? "Please capture at least 1 photo or video."
+          : "Please capture at least 3 images from different rooms and angles for accurate training.",
       );
       return;
     }
@@ -712,14 +721,14 @@ export default function PropertyTrainingScreen() {
     }
 
     Alert.alert(
-      "Start Training",
-      `Upload ${captures.length} item${captures.length !== 1 ? "s" : ""} and train AI on this property? This may take a minute.`,
+      isAddMore ? "Add to Training" : "Start Training",
+      `Upload ${captures.length} item${captures.length !== 1 ? "s" : ""} and ${isAddMore ? "re-train" : "train"} AI on this property? This may take a minute.`,
       [
         { text: "Cancel", style: "cancel" },
-        { text: "Train", style: "default", onPress: handleUploadAndTrain },
+        { text: isAddMore ? "Re-train" : "Train", style: "default", onPress: handleUploadAndTrain },
       ],
     );
-  }, [captures.length, handleUploadAndTrain]);
+  }, [captures.length, isAddMore, handleUploadAndTrain]);
 
   // ──── Intro Phase ────
   if (phase === "intro") {
@@ -1033,6 +1042,7 @@ export default function PropertyTrainingScreen() {
               setCaptures([]);
               uploadedIdsRef.current.clear();
               setTrainingResult(null);
+              setIsAddMore(true);
               setPhase("capturing");
             }}
             activeOpacity={0.8}
@@ -1183,8 +1193,12 @@ export default function PropertyTrainingScreen() {
         <View style={styles.guidanceContainer} pointerEvents="none">
           <Text style={styles.guidanceText}>
             {captures.length === 0
-              ? "Point at the first room and tap capture"
-              : captures.length < 3
+              ? isAddMore
+                ? "Capture the areas you missed"
+                : "Point at the first room and tap capture"
+              : !isAddMore &&
+                  captures.length < 3 &&
+                  !(videoKeyframesAvailable && captures.some((c) => c.type === "video"))
                 ? `Capture ${3 - captures.length} more item${3 - captures.length !== 1 ? "s" : ""} (minimum)`
                 : "Keep capturing or tap Done when finished"}
           </Text>
@@ -1227,24 +1241,33 @@ export default function PropertyTrainingScreen() {
 
         <View style={styles.captureRow}>
           {/* Done button */}
-          <TouchableOpacity
-            style={[
-              styles.finishButton,
-              captures.length < 3 && styles.finishButtonDisabled,
-            ]}
-            onPress={handleDoneCapturing}
-            disabled={captures.length < 3}
-            activeOpacity={0.7}
-          >
-            <Text
-              style={[
-                styles.finishButtonText,
-                captures.length < 3 && styles.finishButtonTextDisabled,
-              ]}
-            >
-              Done ({captures.length})
-            </Text>
-          </TouchableOpacity>
+          {(() => {
+            const hasVideoKeyframes =
+              videoKeyframesAvailable &&
+              captures.some((c) => c.type === "video");
+            const minCaptures = isAddMore ? 1 : hasVideoKeyframes ? 1 : 3;
+            const isDisabled = captures.length < minCaptures;
+            return (
+              <TouchableOpacity
+                style={[
+                  styles.finishButton,
+                  isDisabled && styles.finishButtonDisabled,
+                ]}
+                onPress={handleDoneCapturing}
+                disabled={isDisabled}
+                activeOpacity={0.7}
+              >
+                <Text
+                  style={[
+                    styles.finishButtonText,
+                    isDisabled && styles.finishButtonTextDisabled,
+                  ]}
+                >
+                  Done ({captures.length})
+                </Text>
+              </TouchableOpacity>
+            );
+          })()}
 
           {/* Capture / Record button */}
           <TouchableOpacity
