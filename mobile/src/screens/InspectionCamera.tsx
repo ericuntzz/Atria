@@ -7,6 +7,7 @@ import {
   Alert,
   BackHandler,
   Modal,
+  Switch,
   TextInput,
   KeyboardAvoidingView,
   Platform,
@@ -20,7 +21,7 @@ import { useNavigation, useRoute } from "@react-navigation/native";
 import type { NativeStackNavigationProp } from "@react-navigation/native-stack";
 import type { RouteProp } from "@react-navigation/native";
 import type { RootStackParamList, SummaryData, SummaryRoomData, SummaryFindingData } from "../navigation";
-import FindingsPanel from "../components/FindingsPanel";
+import FindingsPanel, { type DismissReason } from "../components/FindingsPanel";
 import CoverageTracker from "../components/CoverageTracker";
 import { Ionicons } from "@expo/vector-icons";
 import { colors } from "../lib/tokens";
@@ -89,6 +90,7 @@ export default function InspectionCameraScreen() {
   const [autoCaptureEnabled, setAutoCaptureEnabled] = useState(true);
   const [showNoteModal, setShowNoteModal] = useState(false);
   const [showNotesLogModal, setShowNotesLogModal] = useState(false);
+  const [showSettingsModal, setShowSettingsModal] = useState(false);
   const [noteText, setNoteText] = useState("");
   const [captureHint, setCaptureHint] = useState<string | null>(null);
   const [zoom, setZoom] = useState(0);
@@ -171,7 +173,42 @@ export default function InspectionCameraScreen() {
     roomDetectorRef.current = roomDetector;
 
     // Register finding callback
-    comparison.onResult((result, roomId) => {
+    comparison.onResult((result, context) => {
+      const { roomId, roomName, baselineImageId, triggerSource } = context;
+      const skippedForAlignment =
+        result.diagnostics?.skippedByPreflight &&
+        result.diagnostics?.preflight?.reason === "alignment_low_confidence";
+
+      session.recordEvent("comparison_completed", roomId, {
+        baselineImageId,
+        triggerSource,
+        summary: result.summary,
+        findingsCount: result.findings?.length || 0,
+        readinessScore: result.readiness_score,
+        skippedByPreflight: result.diagnostics?.skippedByPreflight || false,
+        preflightReason: result.diagnostics?.preflight?.reason,
+        alignmentScore: result.diagnostics?.preflight?.alignment?.score,
+      });
+
+      if (skippedForAlignment) {
+        session.recordEvent("capture_rejected_alignment", roomId, {
+          baselineImageId,
+          triggerSource,
+          summary: result.summary,
+        });
+        showCaptureHint("Angle mismatch. Move closer to the saved baseline view.");
+        void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
+        return;
+      }
+
+      if (baselineImageId) {
+        session.recordAngleScan(roomId, baselineImageId);
+        updateCoverageUI(session, roomId);
+        if ((result.findings?.length || 0) === 0) {
+          autoAdvanceIfRoomComplete(session, roomId);
+        }
+      }
+
       if (result.findings?.length > 0) {
         for (const f of result.findings) {
           const findingId = session.addFinding(roomId, f);
@@ -186,21 +223,23 @@ export default function InspectionCameraScreen() {
               status: "suggested",
             },
           ]);
-          Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
+          void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
         }
         if (activeImageSource !== "camera") {
           const firstFinding = result.findings[0];
           if (firstFinding) {
-            const roomNameForAudio =
-              baselinesRef.current.find((room) => room.roomId === roomId)
-                ?.roomName || "current room";
             void announcerRef.current.announceFinding(
-              roomNameForAudio,
+              roomName || "current room",
               firstFinding.description,
             );
           }
         }
+      } else if (triggerSource === "manual" && result.readiness_score != null) {
+        showCaptureHint("Angle captured");
+      } else if (triggerSource === "manual" && result.readiness_score == null) {
+        showCaptureHint(result.summary || "That angle could not be analyzed.");
       }
+
       if (result.readiness_score != null) {
         session.updateRoomScore(roomId, result.readiness_score);
       }
@@ -208,6 +247,9 @@ export default function InspectionCameraScreen() {
 
     comparison.onStatusChange((status) => {
       setIsProcessing(status === "processing");
+      if (status === "error") {
+        showCaptureHint("That angle could not be analyzed. Try again.");
+      }
     });
 
     // Load baselines
@@ -246,7 +288,7 @@ export default function InspectionCameraScreen() {
         console.warn("ONNX model load failed, room auto-detect disabled:", err);
       });
 
-    // Start auto-capture loop (every 5s, checks if conditions are met)
+    // Start auto-capture loop (every 3s, checks if conditions are met)
     autoCaptureTimerRef.current = setInterval(() => {
       if (!autoCaptureEnabledRef.current) return;
       if (session.isPaused()) return;
@@ -257,7 +299,7 @@ export default function InspectionCameraScreen() {
       if (!state.currentRoomId) return;
 
       autoCaptureTick(session, comparison);
-    }, 5000);
+    }, 3000);
 
     return () => {
       motionFilter.stop();
@@ -306,6 +348,17 @@ export default function InspectionCameraScreen() {
     [],
   );
 
+  const activateRoom = useCallback(
+    (session: SessionManager, roomId: string, roomName: string) => {
+      changeDetectorRef.current?.reset();
+      comparisonRef.current?.resetBackoff();
+      session.enterRoom(roomId, roomName);
+      setCurrentRoom(roomName);
+      updateCoverageUI(session, roomId);
+    },
+    [updateCoverageUI],
+  );
+
   const getNextIncompleteRoom = useCallback((session: SessionManager) => {
     const state = session.getState();
     for (const room of baselinesRef.current) {
@@ -337,9 +390,7 @@ export default function InspectionCameraScreen() {
 
       if (nextRoom.roomId === roomId) return;
 
-      session.enterRoom(nextRoom.roomId, nextRoom.roomName);
-      setCurrentRoom(nextRoom.roomName);
-      updateCoverageUI(session, nextRoom.roomId);
+      activateRoom(session, nextRoom.roomId, nextRoom.roomName);
       autoAllRoomsCompleteHintRef.current = false;
       showCaptureHint(`Room complete. Auto-switched to ${nextRoom.roomName}.`);
       if (activeImageSource !== "camera") {
@@ -347,7 +398,7 @@ export default function InspectionCameraScreen() {
       }
       void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     },
-    [activeImageSource, getNextIncompleteRoom, showCaptureHint, updateCoverageUI],
+    [activateRoom, activeImageSource, getNextIncompleteRoom, showCaptureHint],
   );
 
   const loadBaselines = useCallback(
@@ -408,15 +459,13 @@ export default function InspectionCameraScreen() {
 
         if (mappedRooms.length > 0) {
           const firstRoom = mappedRooms[0];
-          session.enterRoom(firstRoom.roomId, firstRoom.roomName);
-          setCurrentRoom(firstRoom.roomName);
-          updateCoverageUI(session, firstRoom.roomId);
+          activateRoom(session, firstRoom.roomId, firstRoom.roomName);
         }
       } catch (err) {
         console.error("Failed to load baselines:", err);
       }
     },
-    [inspectionId, updateCoverageUI],
+    [activateRoom, inspectionId],
   );
 
   const loadKnownConditions = useCallback(async () => {
@@ -478,10 +527,8 @@ export default function InspectionCameraScreen() {
 
             if (result?.roomChanged && result.room) {
               // Auto-switch room in session
-              session.enterRoom(result.room.roomId, result.room.roomName);
-              setCurrentRoom(result.room.roomName);
-              updateCoverageUI(session, result.room.roomId);
-              Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+              activateRoom(session, result.room.roomId, result.room.roomName);
+              void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
             }
 
             // Update angle scanning from room detector
@@ -511,7 +558,7 @@ export default function InspectionCameraScreen() {
       // Start the loop
       roomDetectionTimerRef.current = setTimeout(tick, 1000); // Initial 1s delay
     },
-    [updateCoverageUI],
+    [activateRoom, updateCoverageUI],
   );
 
   const captureChangeFrame = useCallback(async (): Promise<Uint8Array | null> => {
@@ -592,14 +639,13 @@ export default function InspectionCameraScreen() {
       const changeResult = changeFrame
         ? comparison.feedChangeFrame(changeFrame)
         : undefined;
-      if (!comparison.shouldTrigger(changeResult)) {
+      if (
+        !comparison.shouldTrigger(changeResult, {
+          allowInitialStillFrame: (visit?.anglesScanned.size || 0) === 0,
+        })
+      ) {
         return;
       }
-
-      // Record angle
-      session.recordAngleScan(currentRoomId, baseline.id);
-      updateCoverageUI(session, currentRoomId);
-      autoAdvanceIfRoomComplete(session, currentRoomId);
 
       const {
         data: { session: authSession },
@@ -633,6 +679,11 @@ export default function InspectionCameraScreen() {
         return null;
       };
 
+      session.recordEvent("comparison_requested", currentRoomId, {
+        baselineImageId: baseline.id,
+        triggerSource: "auto",
+      });
+
       void comparison.triggerComparison(
         captureFrame,
         baseline.imageUrl,
@@ -643,12 +694,13 @@ export default function InspectionCameraScreen() {
           knownConditions: roomKnownConditions,
           inspectionId,
           baselineImageId: baseline.id,
+          triggerSource: "auto",
           apiUrl,
           authToken: authSession.access_token,
         },
       );
     },
-    [autoAdvanceIfRoomComplete, captureChangeFrame, paused, inspectionMode, inspectionId, updateCoverageUI],
+    [captureChangeFrame, paused, inspectionMode, inspectionId],
   );
 
   // Manual room switching (always available — primary mode when ONNX model not loaded)
@@ -666,12 +718,14 @@ export default function InspectionCameraScreen() {
     const nextIdx = (currentIdx + 1) % rooms.length;
     const nextRoom = rooms[nextIdx];
 
-    session.enterRoom(nextRoom.roomId, nextRoom.roomName);
-    setCurrentRoom(nextRoom.roomName);
-    updateCoverageUI(session, nextRoom.roomId);
+    session.recordEvent("room_switched_manually", nextRoom.roomId, {
+      fromRoomId: state.currentRoomId,
+      toRoomId: nextRoom.roomId,
+    });
+    activateRoom(session, nextRoom.roomId, nextRoom.roomName);
 
-    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-  }, [updateCoverageUI]);
+    void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+  }, [activateRoom]);
 
   const handlePause = useCallback(() => {
     const session = sessionRef.current;
@@ -690,6 +744,23 @@ export default function InspectionCameraScreen() {
     });
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
   }, []);
+
+  const handleToggleHandsFree = useCallback(() => {
+    const session = sessionRef.current;
+    setAutoCaptureEnabled((value) => {
+      const next = !value;
+      autoAllRoomsCompleteHintRef.current = false;
+      session?.recordEvent("hands_free_toggled", session.getState().currentRoomId || undefined, {
+        enabled: next,
+      });
+      showCaptureHint(
+        next
+          ? "Hands-free AI capture enabled"
+          : "Hands-free AI capture paused",
+      );
+      return next;
+    });
+  }, [showCaptureHint]);
 
   const handleEndInspection = useCallback(async () => {
     const session = sessionRef.current;
@@ -748,6 +819,17 @@ export default function InspectionCameraScreen() {
       });
     }
 
+    session.recordEvent("inspection_submit_requested", undefined, {
+      resultCount: results.length,
+      confirmedFindings: results.reduce(
+        (total, result) => total + result.findings.length,
+        0,
+      ),
+      completionTier: session.getCompletionTier(),
+    });
+
+    const eventLog = session.getEvents();
+
     if (results.length > 0) {
       try {
         await flushBulkSubmissionQueue();
@@ -755,6 +837,8 @@ export default function InspectionCameraScreen() {
           inspectionId,
           results,
           session.getCompletionTier(),
+          undefined,
+          eventLog,
         );
       } catch (err) {
         console.error("Failed to submit results:", err);
@@ -763,6 +847,7 @@ export default function InspectionCameraScreen() {
             inspectionId,
             results,
             completionTier: session.getCompletionTier(),
+            events: eventLog,
           });
           Alert.alert(
             "Saved for sync",
@@ -887,7 +972,7 @@ export default function InspectionCameraScreen() {
     }
     const baseline = unscanned || room.baselines[0];
     if (!unscanned) {
-      showCaptureHint("Room coverage complete. Tap room name to switch rooms.");
+      showCaptureHint("Room coverage complete. Use Settings to switch rooms.");
     }
 
     if (!comparison.shouldTrigger()) {
@@ -895,13 +980,8 @@ export default function InspectionCameraScreen() {
       return;
     }
 
-    // Record angle as scanned
-    session.recordAngleScan(currentRoomId, baseline.id);
-    updateCoverageUI(session, currentRoomId);
-    autoAdvanceIfRoomComplete(session, currentRoomId);
-
     // Flash feedback
-    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
 
     const {
       data: { session: authSession },
@@ -934,6 +1014,11 @@ export default function InspectionCameraScreen() {
       return null;
     };
 
+    session.recordEvent("comparison_requested", currentRoomId, {
+      baselineImageId: baseline.id,
+      triggerSource: "manual",
+    });
+
     void comparison.triggerComparison(
       captureFrame,
       baseline.imageUrl,
@@ -944,6 +1029,7 @@ export default function InspectionCameraScreen() {
         knownConditions: roomKnownConditions,
         inspectionId,
         baselineImageId: baseline.id,
+        triggerSource: "manual",
         apiUrl,
         authToken: authSession.access_token,
       },
@@ -956,7 +1042,6 @@ export default function InspectionCameraScreen() {
     inspectionMode,
     inspectionId,
     showCaptureHint,
-    updateCoverageUI,
   ]);
 
   const handleConfirmFinding = useCallback((findingId: string) => {
@@ -966,10 +1051,17 @@ export default function InspectionCameraScreen() {
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
   }, [showCaptureHint]);
 
-  const handleDismissFinding = useCallback((findingId: string) => {
-    sessionRef.current?.updateFindingStatus(findingId, "dismissed");
+  const handleDismissFinding = useCallback((findingId: string, reason?: DismissReason) => {
+    sessionRef.current?.updateFindingStatus(findingId, "dismissed", reason ?? undefined);
     setFindings((prev) => prev.filter((f) => f.id !== findingId));
-    showCaptureHint("Finding dismissed");
+    const hint = reason === "not_accurate"
+      ? "Dismissed — feedback saved for review"
+      : reason === "still_there"
+        ? "Dismissed — item is still present"
+        : reason === "known_issue"
+          ? "Dismissed — marked as known issue"
+          : "Finding dismissed";
+    showCaptureHint(hint);
   }, [showCaptureHint]);
 
   const handleAddNote = useCallback(() => {
@@ -1017,10 +1109,23 @@ export default function InspectionCameraScreen() {
   }, [noteText, showCaptureHint]);
 
   const handleDeleteNote = useCallback((findingId: string) => {
-    sessionRef.current?.updateFindingStatus(findingId, "dismissed");
-    setFindings((prev) => prev.filter((f) => f.id !== findingId));
-    showCaptureHint("Note removed");
-    void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    Alert.alert(
+      "Delete this note?",
+      "This will permanently remove the note from this inspection.",
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Delete",
+          style: "destructive",
+          onPress: () => {
+            sessionRef.current?.updateFindingStatus(findingId, "dismissed");
+            setFindings((prev) => prev.filter((f) => f.id !== findingId));
+            showCaptureHint("Note removed");
+            void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+          },
+        },
+      ],
+    );
   }, [showCaptureHint]);
 
   useEffect(() => {
@@ -1046,6 +1151,11 @@ export default function InspectionCameraScreen() {
   const manualNotes = findings.filter(
     (finding) => finding.category === "manual_note" && finding.status === "confirmed",
   );
+  const roomModeLabel = isAutoDetect
+    ? "Auto-detect"
+    : activeImageSource === "camera"
+      ? null
+      : activeImageSourceLabel;
 
   return (
     <View style={styles.container}>
@@ -1094,35 +1204,32 @@ export default function InspectionCameraScreen() {
               <Text style={styles.endButtonText}>← End</Text>
             </TouchableOpacity>
 
-            <TouchableOpacity
+            <View
               style={styles.roomBadge}
-              onPress={handleSwitchRoom}
-              activeOpacity={0.7}
-              accessibilityRole="button"
-              accessibilityLabel={`Current room: ${currentRoom || "Scanning"}. Tap to switch room`}
+              accessibilityRole="text"
+              accessibilityLabel={`Current room: ${currentRoom || "Scanning"}`}
             >
               <View style={styles.roomBadgeHeader}>
                 <Text style={styles.roomName}>
                   {currentRoom || "Scanning..."}
                 </Text>
-                <View style={[
-                  styles.detectModeBadge,
-                  isAutoDetect && styles.detectModeBadgeAuto,
-                ]}>
-                  <Text style={styles.detectModeText}>
-                    {(isAutoDetect ? "Auto" : "Manual") +
-                      (activeImageSource === "camera"
-                        ? ""
-                        : ` • ${activeImageSourceLabel}`)}
-                  </Text>
-                </View>
+                {roomModeLabel ? (
+                  <View
+                    style={[
+                      styles.detectModeBadge,
+                      isAutoDetect && styles.detectModeBadgeAuto,
+                    ]}
+                  >
+                    <Text style={styles.detectModeText}>{roomModeLabel}</Text>
+                  </View>
+                ) : null}
               </View>
               {roomAngles.total > 0 && (
-                <Text style={styles.angleCount}>
+                <Text style={styles.angleCount} numberOfLines={1}>
                   {roomAngles.scanned}/{roomAngles.total} angles
                 </Text>
               )}
-            </TouchableOpacity>
+            </View>
 
             <View style={styles.recBadge}>
               <View
@@ -1168,41 +1275,17 @@ export default function InspectionCameraScreen() {
             </View>
           )}
 
-          <TouchableOpacity
-            style={[
-              styles.autoCaptureToggle,
-              autoCaptureEnabled && styles.autoCaptureToggleOn,
-            ]}
-            onPress={() => {
-              setAutoCaptureEnabled((value) => {
-                const next = !value;
-                autoAllRoomsCompleteHintRef.current = false;
-                showCaptureHint(
-                  next
-                    ? "Hands-free AI capture enabled"
-                    : "Hands-free AI capture paused",
-                );
-                return next;
-              });
-            }}
-            activeOpacity={0.75}
-          >
-            <Text style={styles.autoCaptureToggleText}>
-              {autoCaptureEnabled ? "Hands-Free ON" : "Hands-Free OFF"}
-            </Text>
-          </TouchableOpacity>
-
           <View style={styles.captureRow}>
-            {/* Note button — left of capture */}
+            {/* Settings gear — left */}
             <TouchableOpacity
               style={styles.utilityButton}
-              onPress={handleAddNote}
+              onPress={() => setShowSettingsModal(true)}
               activeOpacity={0.7}
               accessibilityRole="button"
-              accessibilityLabel="Add a note about an issue"
+              accessibilityLabel="Inspection settings"
             >
-              <Ionicons name="document-text-outline" size={18} color="rgba(255,255,255,0.8)" />
-              <Text style={styles.utilityButtonText}>Note</Text>
+              <Ionicons name="settings-outline" size={20} color="rgba(255,255,255,0.8)" />
+              <Text style={styles.utilityButtonText}>Settings</Text>
             </TouchableOpacity>
 
             {/* Capture button — center */}
@@ -1225,24 +1308,34 @@ export default function InspectionCameraScreen() {
               />
             </TouchableOpacity>
 
-            {/* Pause button — right of capture */}
+            {/* Notes button — consolidated add+view */}
             <TouchableOpacity
               style={[styles.utilityButton, styles.utilityButtonWide]}
-              onPress={() => setShowNotesLogModal(true)}
+              onPress={() =>
+                manualNotes.length > 0
+                  ? setShowNotesLogModal(true)
+                  : handleAddNote()
+              }
+              onLongPress={handleAddNote}
               activeOpacity={0.7}
               accessibilityRole="button"
-              accessibilityLabel="Open inspection notes"
+              accessibilityLabel={
+                manualNotes.length > 0
+                  ? "View inspection notes"
+                  : "Add a note"
+              }
             >
               <Ionicons
-                name="list"
+                name="document-text-outline"
                 size={18}
                 color="rgba(255,255,255,0.8)"
               />
               <Text style={styles.utilityButtonText}>
-                Notes ({manualNotes.length})
+                {manualNotes.length > 0 ? `Notes (${manualNotes.length})` : "Notes"}
               </Text>
             </TouchableOpacity>
 
+            {/* Pause button */}
             <TouchableOpacity
               style={styles.utilityButton}
               onPress={handlePause}
@@ -1252,7 +1345,7 @@ export default function InspectionCameraScreen() {
             >
               <Ionicons
                 name={paused ? "play" : "pause"}
-                size={18}
+                size={20}
                 color="rgba(255,255,255,0.8)"
               />
               <Text style={styles.utilityButtonText}>
@@ -1306,7 +1399,7 @@ export default function InspectionCameraScreen() {
                   onPress={handleSubmitNote}
                   disabled={!noteText.trim()}
                 >
-                  <Text style={styles.noteModalSubmitText}>Add Finding</Text>
+                  <Text style={styles.noteModalSubmitText}>Save Note</Text>
                 </TouchableOpacity>
               </View>
             </View>
@@ -1345,6 +1438,15 @@ export default function InspectionCameraScreen() {
               </View>
 
               <TouchableOpacity
+                style={[styles.noteModalCancel, { marginBottom: 8 }]}
+                onPress={() => {
+                  setShowNotesLogModal(false);
+                  setTimeout(() => handleAddNote(), 300);
+                }}
+              >
+                <Text style={styles.noteModalCancelText}>+ Add Note</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
                 style={styles.noteModalSubmit}
                 onPress={() => setShowNotesLogModal(false)}
               >
@@ -1353,6 +1455,112 @@ export default function InspectionCameraScreen() {
             </View>
           </View>
         </Modal>
+
+      {/* Settings Modal */}
+      <Modal
+        visible={showSettingsModal}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setShowSettingsModal(false)}
+      >
+        <View style={styles.noteModalOverlay}>
+          <View style={styles.notesLogModalContent}>
+            <Text style={styles.noteModalTitle}>Inspection Settings</Text>
+            <Text style={styles.noteModalSubtitle}>
+              Adjust how the inspection runs
+            </Text>
+
+            <View style={styles.settingsSection}>
+              <View
+                style={[
+                  styles.settingsRow,
+                  autoCaptureEnabled && styles.settingsRowActive,
+                ]}
+              >
+                <View style={styles.settingsRowLeft}>
+                  <Ionicons
+                    name="scan-outline"
+                    size={20}
+                    color={autoCaptureEnabled ? "#22c55e" : colors.muted}
+                  />
+                  <View>
+                    <Text style={styles.settingsLabel}>Hands-Free Capture</Text>
+                    <Text style={styles.settingsDescription}>
+                      Atria captures new angles automatically when the phone is steady
+                    </Text>
+                  </View>
+                </View>
+                <Switch
+                  value={autoCaptureEnabled}
+                  onValueChange={handleToggleHandsFree}
+                  thumbColor="#ffffff"
+                  trackColor={{
+                    false: "rgba(148, 163, 184, 0.35)",
+                    true: "rgba(34, 197, 94, 0.55)",
+                  }}
+                />
+              </View>
+
+              <View style={styles.settingsRow}>
+                <View style={styles.settingsRowLeft}>
+                  <Ionicons
+                    name="locate-outline"
+                    size={20}
+                    color={isAutoDetect ? "#22c55e" : colors.muted}
+                  />
+                  <View>
+                    <Text style={styles.settingsLabel}>Room Selection</Text>
+                    <Text style={styles.settingsDescription}>
+                      {isAutoDetect
+                        ? "Auto-detect is on, but you can still switch rooms yourself"
+                        : "Manual room selection is active for this inspection"}
+                    </Text>
+                  </View>
+                </View>
+                <TouchableOpacity
+                  style={[
+                    styles.settingsActionButton,
+                    baselinesRef.current.length <= 1 && styles.settingsActionButtonDisabled,
+                  ]}
+                  onPress={() => {
+                    if (baselinesRef.current.length <= 1) return;
+                    handleSwitchRoom();
+                    setShowSettingsModal(false);
+                    showCaptureHint("Switched to the next trained room.");
+                  }}
+                  disabled={baselinesRef.current.length <= 1}
+                  activeOpacity={0.8}
+                >
+                  <Text style={styles.settingsActionButtonText}>
+                    {baselinesRef.current.length <= 1 ? "One Room" : "Switch Room"}
+                  </Text>
+                </TouchableOpacity>
+              </View>
+
+              {activeImageSource !== "camera" && (
+                <View style={styles.settingsRow}>
+                  <View style={styles.settingsRowLeft}>
+                    <Ionicons name="videocam-outline" size={20} color={colors.primary} />
+                    <View>
+                      <Text style={styles.settingsLabel}>Image Source</Text>
+                      <Text style={styles.settingsDescription}>
+                        Currently using: {activeImageSourceLabel}
+                      </Text>
+                    </View>
+                  </View>
+                </View>
+              )}
+            </View>
+
+            <TouchableOpacity
+              style={styles.noteModalSubmit}
+              onPress={() => setShowSettingsModal(false)}
+            >
+              <Text style={styles.noteModalSubmitText}>Done</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
 
       {/* Findings Panel */}
       <FindingsPanel
@@ -1516,28 +1724,9 @@ const styles = StyleSheet.create({
   captureRow: {
     flexDirection: "row",
     alignItems: "center",
-    justifyContent: "center",
-    gap: 14,
-  },
-  autoCaptureToggle: {
-    alignSelf: "center",
-    marginBottom: 10,
-    backgroundColor: "rgba(148,163,184,0.18)",
-    borderWidth: 1,
-    borderColor: "rgba(148,163,184,0.3)",
-    borderRadius: 999,
-    paddingHorizontal: 14,
-    paddingVertical: 7,
-  },
-  autoCaptureToggleOn: {
-    backgroundColor: "rgba(34,197,94,0.18)",
-    borderColor: "rgba(34,197,94,0.35)",
-  },
-  autoCaptureToggleText: {
-    color: "#fff",
-    fontSize: 12,
-    fontWeight: "600",
-    letterSpacing: 0.2,
+    justifyContent: "space-evenly",
+    paddingHorizontal: 12,
+    gap: 12,
   },
   captureHintBubble: {
     marginBottom: 12,
@@ -1579,11 +1768,11 @@ const styles = StyleSheet.create({
   utilityButton: {
     alignItems: "center",
     justifyContent: "center",
-    width: 56,
+    width: 60,
     gap: 4,
   },
   utilityButtonWide: {
-    width: 84,
+    width: 88,
   },
   utilityButtonText: {
     color: "rgba(255,255,255,0.6)",
@@ -1707,6 +1896,56 @@ const styles = StyleSheet.create({
     color: colors.primaryForeground,
     fontSize: 16,
     fontWeight: "600",
+  },
+  settingsSection: {
+    gap: 10,
+    marginBottom: 16,
+  },
+  settingsRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    backgroundColor: colors.secondary,
+    borderRadius: 12,
+    padding: 14,
+    borderWidth: 1,
+    borderColor: colors.stone,
+  },
+  settingsRowActive: {
+    borderColor: "rgba(34,197,94,0.3)",
+  },
+  settingsRowLeft: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    flex: 1,
+  },
+  settingsLabel: {
+    color: colors.heading,
+    fontSize: 15,
+    fontWeight: "600",
+  },
+  settingsDescription: {
+    color: colors.muted,
+    fontSize: 12,
+    marginTop: 2,
+    maxWidth: 200,
+  },
+  settingsActionButton: {
+    backgroundColor: "rgba(77,166,255,0.12)",
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: "rgba(77,166,255,0.25)",
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+  },
+  settingsActionButtonDisabled: {
+    opacity: 0.5,
+  },
+  settingsActionButtonText: {
+    color: colors.primary,
+    fontSize: 12,
+    fontWeight: "700",
   },
   permissionContainer: {
     flex: 1,

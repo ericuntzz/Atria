@@ -394,10 +394,11 @@ export async function submitBulkResults(
   results: unknown[],
   completionTier?: string,
   notes?: string,
+  events?: unknown[],
 ) {
   const res = await authFetch(`/api/inspections/${inspectionId}/bulk`, {
     method: "POST",
-    json: { results, completionTier, notes },
+    json: { results, completionTier, notes, events },
   });
   return res.json();
 }
@@ -434,32 +435,6 @@ export async function trainProperty(propertyId: string, mediaUploadIds: string[]
 export async function getRooms(propertyId: string) {
   const res = await authFetch(`/api/properties/${propertyId}/rooms`);
   return res.json();
-}
-
-// ============================================================================
-// Vision Comparison (SSE)
-// ============================================================================
-
-export interface CompareStreamOptions {
-  baselineUrl: string;
-  currentImages: string[];
-  roomName: string;
-  inspectionMode?: string;
-  knownConditions?: string[];
-  inspectionId?: string;
-  roomId?: string;
-  baselineImageId?: string;
-}
-
-/**
- * POST to the SSE compare-stream endpoint.
- * Returns the raw Response for SSE parsing by the comparison manager.
- */
-export async function compareStream(options: CompareStreamOptions) {
-  return authFetch("/api/vision/compare-stream", {
-    method: "POST",
-    json: options as unknown as Record<string, unknown>,
-  });
 }
 
 // ============================================================================

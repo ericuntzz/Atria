@@ -24,14 +24,32 @@ export interface ComparisonFinding {
   objectClass?: string;
 }
 
+export interface ComparisonDiagnostics {
+  model?: string;
+  aiLatencyMs?: number;
+  skippedByPreflight?: boolean;
+  preflight?: {
+    reason?: string;
+    ssim?: number;
+    diffPercent?: number;
+    alignment?: {
+      dx: number;
+      dy: number;
+      score: number;
+      maxShift: number;
+    };
+  };
+}
+
 export interface ComparisonResult {
   findings: ComparisonFinding[];
   summary: string;
-  readiness_score: number;
+  readiness_score: number | null;
+  diagnostics?: ComparisonDiagnostics;
 }
 
 export interface ComparisonManagerConfig {
-  /** Minimum interval between comparisons in ms (default 5000) */
+  /** Minimum interval between comparisons in ms (default 3000) */
   minIntervalMs: number;
   /** Maximum concurrent comparisons (default 1) */
   maxConcurrent: number;
@@ -40,12 +58,24 @@ export interface ComparisonManagerConfig {
 }
 
 const DEFAULT_CONFIG: ComparisonManagerConfig = {
-  minIntervalMs: 5000,
+  minIntervalMs: 3000,
   maxConcurrent: 1,
   burstDelayMs: 500,
 };
 
-type ComparisonCallback = (result: ComparisonResult, roomId: string) => void;
+export type ComparisonTriggerSource = "auto" | "manual";
+
+export interface ComparisonContext {
+  roomId: string;
+  roomName: string;
+  baselineImageId?: string;
+  triggerSource: ComparisonTriggerSource;
+}
+
+type ComparisonCallback = (
+  result: ComparisonResult,
+  context: ComparisonContext,
+) => void;
 type StatusCallback = (status: "processing" | "complete" | "error") => void;
 
 /** Capture function signature — captures a single frame, returns base64 data URI */
@@ -65,6 +95,8 @@ export class ComparisonManager {
   private activeComparisons = 0;
   private paused = false;
   private lastChangeResult: ChangeDetectionResult | null = null;
+  private consecutiveFailures = 0;
+  private static readonly MAX_BACKOFF_FAILURES = 5;
 
   private onFinding: ComparisonCallback | null = null;
   private onStatus: StatusCallback | null = null;
@@ -108,18 +140,30 @@ export class ComparisonManager {
    * Check if conditions are met for triggering a comparison.
    * Uses the last change detection result from feedChangeFrame().
    */
-  shouldTrigger(changeResult?: ChangeDetectionResult): boolean {
+  shouldTrigger(
+    changeResult?: ChangeDetectionResult,
+    options?: { allowInitialStillFrame?: boolean },
+  ): boolean {
     const result = changeResult || this.lastChangeResult;
 
     if (this.paused) return false;
     if (this.activeComparisons >= this.config.maxConcurrent) return false;
     if (!this.motionFilter.isStable()) return false;
 
+    // Exponential backoff on consecutive failures (3s, 6s, 12s, 24s, 48s cap)
+    const backoffMultiplier = Math.min(
+      Math.pow(2, this.consecutiveFailures),
+      1 << ComparisonManager.MAX_BACKOFF_FAILURES,
+    );
+    const effectiveInterval = this.config.minIntervalMs * backoffMultiplier;
+
     const elapsed = Date.now() - this.lastComparisonTime;
-    if (elapsed < this.config.minIntervalMs) return false;
+    if (elapsed < effectiveInterval) return false;
 
     // If we have change detection data, require meaningful change
-    if (result && !result.hasMeaningfulChange) return false;
+    if (result && !result.hasMeaningfulChange && !options?.allowInitialStillFrame) {
+      return false;
+    }
 
     return true;
   }
@@ -160,6 +204,7 @@ export class ComparisonManager {
       knownConditions?: string[];
       inspectionId?: string;
       baselineImageId?: string;
+      triggerSource?: ComparisonTriggerSource;
       apiUrl: string;
       authToken: string;
     },
@@ -216,28 +261,48 @@ export class ComparisonManager {
       });
 
       if (!res.ok) {
+        this.consecutiveFailures++;
         this.onStatus?.("error");
         return;
       }
 
       // Parse SSE response — handle multi-line data fields
       const text = await res.text();
-      const events = text.split("\n\n");
-      for (const event of events) {
+      const sseEvents = text.split("\n\n");
+      let receivedResult = false;
+      for (const event of sseEvents) {
         const typeMatch = event.match(/^event: (\w+)/m);
         const dataMatch = event.match(/^data: (.+)$/m);
         if (typeMatch?.[1] === "result" && dataMatch?.[1]) {
           try {
             const result: ComparisonResult = JSON.parse(dataMatch[1]);
-            this.onFinding?.(result, roomId);
-          } catch {
-            // Parse error — continue
+            receivedResult = true;
+            this.onFinding?.(result, {
+              roomId,
+              roomName,
+              baselineImageId: options.baselineImageId,
+              triggerSource: options.triggerSource || "auto",
+            });
+          } catch (parseErr) {
+            console.warn("[ComparisonManager] Failed to parse SSE result:", parseErr);
           }
+        } else if (typeMatch?.[1] === "error") {
+          console.warn("[ComparisonManager] Server returned SSE error event");
+          this.consecutiveFailures++;
+          this.onStatus?.("error");
+          return;
         }
       }
 
-      this.onStatus?.("complete");
+      if (receivedResult) {
+        this.consecutiveFailures = 0;
+        this.onStatus?.("complete");
+      } else {
+        this.consecutiveFailures++;
+        this.onStatus?.("error");
+      }
     } catch {
+      this.consecutiveFailures++;
       this.onStatus?.("error");
     } finally {
       this.activeComparisons--;
@@ -277,5 +342,13 @@ export class ComparisonManager {
 
   isPaused(): boolean {
     return this.paused;
+  }
+
+  /**
+   * Reset the consecutive failure counter.
+   * Call on room switch or manual capture to give a fresh start.
+   */
+  resetBackoff() {
+    this.consecutiveFailures = 0;
   }
 }

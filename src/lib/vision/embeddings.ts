@@ -75,7 +75,7 @@ async function ensureModel(): Promise<boolean> {
       executionProviders: ["cpu"],
     });
     modelAvailable = true;
-    console.log("[embeddings] ONNX model loaded successfully");
+    console.info("[embeddings] ONNX model loaded successfully");
     return true;
   } catch (error) {
     console.error("[embeddings] Failed to load ONNX model:", error);

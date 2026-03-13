@@ -63,6 +63,8 @@ const EMPTY_RESULT: ComparisonResult = {
   summary: "Not evaluated",
 };
 
+const DEFAULT_HARD_ALIGNMENT_SKIP_THRESHOLD = 0.38;
+
 /**
  * Build the expert inspection prompt based on inspection mode and context.
  */
@@ -83,11 +85,38 @@ function buildExpertPrompt(
 
   return `You are a Master Home Inspector specializing in luxury vacation rentals ($3M–$20M+ properties). Compare the BASELINE image(s) against the CURRENT image(s) of "${roomName}".
 
+## CRITICAL: FIELD-OF-VIEW AWARENESS
+The current image may show only ONE ANGLE of the room. The inspector walks through and captures multiple angles over time.
+
+**NEVER flag an item as "missing" just because it is not visible in the current frame.** The camera may simply not be pointed at that area yet. Items can only be considered "missing" when:
+1. The current image is clearly showing the SAME area/wall/surface where the item appears in the baseline, AND
+2. The item is definitively absent from that specific location.
+
+If an item from the baseline is simply outside the current camera's field of view, it is NOT missing — it just hasn't been inspected yet. **When in doubt, do NOT flag it.** Err heavily on the side of NOT reporting a finding rather than creating a false positive.
+
+## CATEGORY ACCURACY
+Use the correct category for each finding:
+- **"missing"** — item is GONE from the location where it clearly should be (NOT "damage")
+- **"damage"** — item IS present but is broken, scratched, cracked, stained, or physically degraded
+- **"moved"** — item is present but in a noticeably different position than baseline
+- **"cleanliness"** — dirt, dust, debris, stains on surfaces
+- **"restock"** — consumable items depleted (coffee pods, soap, tissues)
+- **"operational"** — appliance/setting in wrong state (oven knob on, window open)
+
+NEVER label an absent item as "damage". Absent = "missing". Broken/degraded = "damage". These are different categories.
+
+## CONFIDENCE CALIBRATION
+Be conservative with confidence scores:
+- **0.9-1.0**: Only for obvious, unmistakable issues visible in the image (broken glass, large stain, clearly empty shelf)
+- **0.7-0.89**: Clear issues but with some ambiguity (item appears missing from its spot, moderate damage)
+- **0.5-0.69**: Possible issues that need verification (might be angle/lighting, subtle change)
+- **Below 0.5**: Do NOT report. If you're less than 50% confident, skip it entirely.
+
 ## OBJECT CATEGORIZATION (Four-Class Inventory Doctrine)
 Classify all detected objects into one of four categories:
 1. **Fixed/structural** (cabinets, sinks, appliances, built-in shelves, windows, doors, countertops, mounted decor, built-ins) — deviations ALWAYS trigger alerts
 2. **Durable movable** (chairs, stools, coffee tables, lamps, cookware, remote controls, hair dryers) — tolerance for repositioning; only alert if missing entirely or damaged
-3. **Decorative objects** (pillows, throws, small decor, artwork, table settings) — high tolerance; only alert if baseline inventory item is completely absent
+3. **Decorative objects** (pillows, throws, small decor, artwork, table settings) — high tolerance; only alert if baseline inventory item is completely absent from the SAME visible area
 4. **Consumables/replenishable** (coffee pods, soaps, tissues, paper goods, cleaning supplies, firewood, welcome basket items, pool towels) — do NOT treat depletion as damage. Route to restock lane.
 
 ## THREE OUTPUT LANES
@@ -107,6 +136,7 @@ Focus especially on:
 Look for: hairline cracks, nail holes, small stains, scuff marks, paint chips, chipped tile, scratched surfaces, water rings. Zoom and enhance on subtle details.
 
 ## WHAT TO IGNORE
+- **Out-of-frame items**: Anything in the baseline that is simply not in the current camera view — NOT missing
 - **Lighting differences**: Focus on structural/object changes, not shadow/brightness/color temperature differences
 - **Smart home states**: Screens on/off, Lutron/Control4 lights different colors, motorized blinds different positions — these are automated behaviors, not issues
 - **Minor repositioning**: Durable movable items shifted slightly are normal
@@ -114,6 +144,14 @@ Look for: hairline cracks, nail holes, small stains, scuff marks, paint chips, c
 - **Pet tolerance**: Pet hair, nose prints on glass, paw prints — classify as temporary surface mess, NOT scratches/stains/damage
 - **Lens distortion**: Ignore geometric warping at frame edges from wide-angle lens
 - **Reflections**: Ignore reflections in mirrors or glass surfaces when identifying missing items
+- **Different camera angles**: If baseline and current are shot from different positions, account for parallax — objects may appear shifted but are actually in the same place
+
+## VISIBILITY + ANGLE GUARDRAILS
+- Before marking anything as missing, moved, damaged, or absent, confirm the SAME baseline zone is clearly visible in the current image(s)
+- If the current framing is tighter, wider, cropped, occluded, blurred, or shot from a materially different angle, do NOT guess
+- Never convert "not visible" into "missing"
+- Only flag a moved item when the same item is clearly visible in both views with a materially different position relative to stable anchors
+- If the comparison is not reliable because the angle does not match the baseline well enough, return no findings and a null readiness_score
 
 ## OPERATIONAL STATE CHECKS
 Check: faucet positions (on/off), window open/closed, blinds position, oven/stove knobs, thermostat visible settings, light switches, toilet seats, shower doors. Only flag open windows/doors if they create risk (weather, security).
@@ -137,10 +175,10 @@ Return ONLY valid JSON in this exact format:
     }
   ],
   "summary": "Brief overall assessment",
-  "readiness_score": 0-100
+  "readiness_score": 0-100 or null
 }
 
-If the room looks perfect with no issues, return empty findings array and score 100.`;
+Prefer FEWER, HIGH-CONFIDENCE findings over many uncertain ones. Quality over quantity. If the room looks good from this angle, return empty findings array and score 100.`;
 }
 
 function getModeInstructions(mode: InspectionMode): string {
@@ -256,11 +294,44 @@ export async function compareImages(
       return { ...EMPTY_RESULT, summary: "Failed to fetch any current images" };
     }
 
+    // Guard: skip AI call if baseline or current images have empty base64 data
+    if (!baselineData.base64 || baselineData.base64.length < 100) {
+      console.warn("[compare] Baseline image is empty or too small, skipping AI call");
+      return { ...EMPTY_RESULT, summary: "Baseline image unavailable" };
+    }
+    const validCurrentData = currentData.filter(d => d.base64 && d.base64.length >= 100);
+    if (validCurrentData.length === 0) {
+      console.warn("[compare] All current images are empty, skipping AI call");
+      return { ...EMPTY_RESULT, summary: "Current image unavailable" };
+    }
+
     // Run preflight alignment + perceptual gate on baseline vs first current frame.
     const preflight = await runPreflightGate({
       baselineBase64: baselineData.base64,
-      currentBase64: currentData[0].base64,
+      currentBase64: validCurrentData[0].base64,
     });
+
+    const hardAlignmentSkipThreshold = envNumber(
+      "VISION_PREFLIGHT_HARD_ALIGNMENT_SKIP_THRESHOLD",
+      DEFAULT_HARD_ALIGNMENT_SKIP_THRESHOLD,
+    );
+
+    if (
+      preflight?.reason === "alignment_low_confidence" &&
+      preflight.alignment.score < hardAlignmentSkipThreshold
+    ) {
+      return {
+        findings: [],
+        summary:
+          "Current frame does not match the saved baseline angle closely enough yet.",
+        readiness_score: null,
+        diagnostics: {
+          skippedByPreflight: true,
+          preflight,
+          model: "preflight-gate",
+        },
+      };
+    }
 
     if (preflight && !preflight.shouldCallAi) {
       return {
@@ -304,9 +375,9 @@ export async function compareImages(
     ];
 
     // Add current image(s)
-    for (let i = 0; i < currentData.length; i++) {
-      const label = currentData.length > 1
-        ? `CURRENT IMAGE ${i + 1} of ${currentData.length} (captured ${i * 500}ms apart):`
+    for (let i = 0; i < validCurrentData.length; i++) {
+      const label = validCurrentData.length > 1
+        ? `CURRENT IMAGE ${i + 1} of ${validCurrentData.length} (captured ${i * 500}ms apart):`
         : `CURRENT IMAGE (how "${roomName}" looks now):`;
 
       content.push(
@@ -315,8 +386,8 @@ export async function compareImages(
           type: "image",
           source: {
             type: "base64",
-            media_type: currentData[i].mediaType,
-            data: currentData[i].base64,
+            media_type: validCurrentData[i].mediaType,
+            data: validCurrentData[i].base64,
           },
         },
       );
@@ -325,7 +396,7 @@ export async function compareImages(
     // Add expert prompt
     content.push({
       type: "text",
-      text: buildExpertPrompt(roomName, inspectionMode, knownConditions, currentData.length),
+      text: buildExpertPrompt(roomName, inspectionMode, knownConditions, validCurrentData.length),
     });
 
     const aiModel = process.env.ANTHROPIC_VISION_MODEL || "claude-sonnet-4-20250514";
@@ -427,4 +498,11 @@ function inferMediaTypeFromDataUri(base64OrDataUri: string): string | null {
   if (end === -1) return null;
   const mediaType = base64OrDataUri.slice(5, end).trim();
   return mediaType || null;
+}
+
+function envNumber(name: string, fallback: number): number {
+  const value = process.env[name];
+  if (!value) return fallback;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
 }

@@ -2,7 +2,7 @@ import { NextRequest } from "next/server";
 import { getDbUser, isValidUUID, isSafeUrl } from "@/lib/auth";
 import { compareImages, type InspectionMode } from "@/lib/vision/compare";
 import { db } from "@/server/db";
-import { inspectionResults, inspections } from "@/server/schema";
+import { inspections } from "@/server/schema";
 import { eq, and } from "drizzle-orm";
 import { emitEventSafe } from "@/lib/events/emit";
 
@@ -226,27 +226,6 @@ export async function POST(request: NextRequest) {
             `event: result\ndata: ${JSON.stringify(result)}\n\n`,
           ),
         );
-
-        // Optionally persist to inspectionResults
-        if (inspectionId && roomId && baselineImageId) {
-          try {
-            const aiUnavailable = result.readiness_score === null;
-            await db.insert(inspectionResults).values({
-              inspectionId: inspectionId as string,
-              roomId: roomId as string,
-              baselineImageId: baselineImageId as string,
-              currentImageUrl: "base64-capture",
-              status: aiUnavailable
-                ? "flagged"
-                : (result.findings.length === 0 ? "passed" : "flagged"),
-              score: result.readiness_score,
-              findings: result.findings,
-              rawResponse: JSON.stringify(result),
-            });
-          } catch (dbError) {
-            console.error("Failed to persist comparison result:", dbError);
-          }
-        }
 
         // Send done event
         controller.enqueue(

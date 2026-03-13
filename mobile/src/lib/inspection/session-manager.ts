@@ -30,6 +30,7 @@ export interface RoomFinding extends ComparisonFinding {
   status: "suggested" | "confirmed" | "dismissed" | "muted";
   captureUrl?: string;
   baselineImageId?: string;
+  dismissReason?: string;
   timestamp: number;
 }
 
@@ -177,16 +178,23 @@ export class SessionManager {
 
   /**
    * Update finding status (confirm, dismiss, mute).
+   * Optional dismissReason for feedback learning when status is "dismissed".
    */
   updateFindingStatus(
     findingId: string,
     status: "confirmed" | "dismissed" | "muted",
+    dismissReason?: string,
   ) {
     for (const visit of this.state.visitedRooms.values()) {
       const finding = visit.findings.find((f) => f.id === findingId);
       if (finding) {
         finding.status = status;
-        this.logEvent(`finding_${status}`, visit.roomId, { findingId });
+        const eventData: Record<string, unknown> = { findingId };
+        if (status === "dismissed" && dismissReason) {
+          (finding as unknown as Record<string, unknown>).dismissReason = dismissReason;
+          eventData.reason = dismissReason;
+        }
+        this.logEvent(`finding_${status}`, visit.roomId, eventData);
         return;
       }
     }
@@ -356,6 +364,14 @@ export class SessionManager {
    */
   getEvents(): InspectionEvent[] {
     return this.state.events;
+  }
+
+  recordEvent(
+    eventType: string,
+    roomId?: string,
+    metadata?: Record<string, unknown>,
+  ) {
+    this.logEvent(eventType, roomId, metadata);
   }
 
   private logEvent(

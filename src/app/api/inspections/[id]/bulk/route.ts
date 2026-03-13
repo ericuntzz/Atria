@@ -3,6 +3,7 @@ import { getDbUser, isValidUUID, isSafeUrl } from "@/lib/auth";
 import { db } from "@/server/db";
 import {
   inspections,
+  inspectionEvents,
   inspectionResults,
   rooms,
   baselineImages,
@@ -20,6 +21,13 @@ interface BulkRoomResult {
   score?: number | null;
   findings?: Finding[];
   rawResponse?: string;
+}
+
+interface BulkInspectionEvent {
+  eventType: string;
+  roomId?: string | null;
+  metadata?: Record<string, unknown>;
+  timestamp?: number | string;
 }
 
 // POST /api/inspections/[id]/bulk - Submit multiple room results at once
@@ -58,7 +66,7 @@ export async function POST(
     return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
   }
 
-  const { results, completionTier, notes } = body;
+  const { results, completionTier, notes, events } = body;
 
   if (!results || !Array.isArray(results) || results.length === 0) {
     return NextResponse.json(
@@ -75,8 +83,20 @@ export async function POST(
       { status: 400 },
     );
   }
+  const MAX_BULK_EVENTS = 5000;
+  if (events && (!Array.isArray(events) || events.length > MAX_BULK_EVENTS)) {
+    return NextResponse.json(
+      {
+        error: `events must be an array and must not exceed ${MAX_BULK_EVENTS} items`,
+      },
+      { status: 400 },
+    );
+  }
 
   const roomResults = results as BulkRoomResult[];
+  const inspectionEventRows: BulkInspectionEvent[] = Array.isArray(events)
+    ? (events as BulkInspectionEvent[])
+    : [];
 
   // Validate all room IDs and baseline image IDs belong to this property
   const propertyRooms = await db
@@ -155,6 +175,57 @@ export async function POST(
     }
   }
 
+  for (const event of inspectionEventRows) {
+    if (!event || typeof event !== "object") {
+      return NextResponse.json(
+        { error: "Each event must be an object" },
+        { status: 400 },
+      );
+    }
+    if (typeof event.eventType !== "string" || !event.eventType.trim()) {
+      return NextResponse.json(
+        { error: "Each event must include an eventType string" },
+        { status: 400 },
+      );
+    }
+    if (event.roomId !== undefined && event.roomId !== null) {
+      if (typeof event.roomId !== "string" || !isValidUUID(event.roomId)) {
+        return NextResponse.json(
+          { error: "event roomId must be a valid UUID when provided" },
+          { status: 400 },
+        );
+      }
+      if (!validRoomIds.has(event.roomId)) {
+        return NextResponse.json(
+          { error: `Event roomId ${event.roomId} does not belong to this property` },
+          { status: 400 },
+        );
+      }
+    }
+    if (
+      event.metadata !== undefined &&
+      event.metadata !== null &&
+      (typeof event.metadata !== "object" || Array.isArray(event.metadata))
+    ) {
+      return NextResponse.json(
+        { error: "event metadata must be an object when provided" },
+        { status: 400 },
+      );
+    }
+    if (event.timestamp !== undefined && event.timestamp !== null) {
+      const parsed =
+        typeof event.timestamp === "number"
+          ? new Date(event.timestamp)
+          : new Date(event.timestamp);
+      if (Number.isNaN(parsed.getTime())) {
+        return NextResponse.json(
+          { error: "event timestamp must be a valid date or epoch milliseconds" },
+          { status: 400 },
+        );
+      }
+    }
+  }
+
   // Validate baseline images belong to correct rooms in this property (scoped to this property's rooms)
   const roomIds = propertyRooms.map((r) => r.id);
   const validBaselineRows = roomIds.length > 0
@@ -226,6 +297,21 @@ export async function POST(
         completedAt: new Date(),
       })
       .where(eq(inspections.id, id));
+
+    if (inspectionEventRows.length > 0) {
+      await tx.insert(inspectionEvents).values(
+        inspectionEventRows.map((event) => ({
+          inspectionId: id,
+          eventType: event.eventType.trim(),
+          roomId: event.roomId || undefined,
+          metadata: event.metadata || undefined,
+          timestamp:
+            event.timestamp !== undefined && event.timestamp !== null
+              ? new Date(event.timestamp)
+              : new Date(),
+        })),
+      );
+    }
 
     return inserted;
   });

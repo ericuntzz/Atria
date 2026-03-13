@@ -53,7 +53,7 @@ export async function loadOnnxModel(): Promise<OnnxModelLoader> {
     }
 
     const session = await ort.InferenceSession.create(modelAsset.localUri);
-    console.log("[onnx-model] MobileCLIP-S0 loaded successfully");
+    console.info("[onnx-model] MobileCLIP-S0 loaded successfully");
 
     return {
       isLoaded: true,
@@ -123,7 +123,7 @@ export async function loadOnnxModel(): Promise<OnnxModelLoader> {
 
       dispose() {
         // onnxruntime-react-native sessions are cleaned up by GC
-        console.log("[onnx-model] Model disposed");
+        console.info("[onnx-model] Model disposed");
       },
     };
   } catch (error) {

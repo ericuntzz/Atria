@@ -27,6 +27,7 @@ import {
   Animated,
   Easing,
   BackHandler,
+  Linking,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { CameraView, useCameraPermissions } from "expo-camera";
@@ -43,6 +44,7 @@ import {
   uploadImageFile,
   uploadVideoFile,
   trainProperty,
+  ApiError,
 } from "../lib/api";
 import { colors } from "../lib/tokens";
 
@@ -417,6 +419,13 @@ export default function PropertyTrainingScreen() {
         Alert.alert(
           "Camera Required",
           "Camera access is needed to capture baseline images for training.",
+          [
+            { text: "Cancel", style: "cancel" },
+            {
+              text: "Open Settings",
+              onPress: () => Linking.openSettings(),
+            },
+          ],
         );
         return;
       }
@@ -594,6 +603,8 @@ export default function PropertyTrainingScreen() {
           mediaUploadIds.push(videoResult.id);
           progressCurrent += 1;
           setUploadProgress({ current: progressCurrent, total });
+          // Save partial progress so video isn't re-uploaded on retry
+          uploadedIdsRef.current.set(capture.id, [...uploadedForCapture]);
 
           const keyframeUris = await extractVideoKeyframeUris(capture.uri);
           for (let frameIndex = 0; frameIndex < keyframeUris.length; frameIndex++) {
@@ -660,11 +671,25 @@ export default function PropertyTrainingScreen() {
         setError("Upload/training canceled.");
         return;
       }
-      setError(
-        err instanceof Error
-          ? `${stage === "upload" ? "Upload" : "Training"} failed: ${err.message}`
-          : "Training failed. Please check your connection and try again.",
-      );
+
+      // Status-specific error messages for better user feedback
+      if (err instanceof ApiError) {
+        if (err.status === 409) {
+          setError("Training is already in progress for this property. Please wait a moment and try again.");
+        } else if (err.status === 413) {
+          setError("Images are too large. Try capturing fewer or lower-resolution images.");
+        } else if (err.status >= 500) {
+          setError(`Server error during ${stage === "upload" ? "upload" : "training"}. Please try again in a few moments.`);
+        } else {
+          setError(`${stage === "upload" ? "Upload" : "Training"} failed: ${err.message}`);
+        }
+      } else {
+        setError(
+          err instanceof Error
+            ? `${stage === "upload" ? "Upload" : "Training"} failed: ${err.message}`
+            : "Training failed. Please check your connection and try again.",
+        );
+      }
       setPhase("capturing");
     }
   }, [captures, extractVideoKeyframeUris, isRunActive, propertyId]);
@@ -1002,6 +1027,21 @@ export default function PropertyTrainingScreen() {
         </ScrollView>
 
         <View style={styles.resultsFooter}>
+          <TouchableOpacity
+            style={styles.addMoreButton}
+            onPress={() => {
+              setCaptures([]);
+              uploadedIdsRef.current.clear();
+              setTrainingResult(null);
+              setPhase("capturing");
+            }}
+            activeOpacity={0.8}
+          >
+            <Text style={styles.addMoreButtonText}>Add More</Text>
+            <Text style={styles.addMoreButtonSub}>
+              Re-train with additional photos
+            </Text>
+          </TouchableOpacity>
           <TouchableOpacity
             style={styles.doneButton}
             onPress={() => navigation.popToTop()}
@@ -1703,6 +1743,25 @@ const styles = StyleSheet.create({
   resultsFooter: {
     padding: 20,
     paddingBottom: 32,
+    gap: 12,
+  },
+  addMoreButton: {
+    borderWidth: 1.5,
+    borderColor: colors.primary,
+    borderRadius: 16,
+    paddingVertical: 16,
+    alignItems: "center",
+  },
+  addMoreButtonText: {
+    color: colors.primary,
+    fontSize: 18,
+    fontWeight: "600",
+    letterSpacing: 0.3,
+  },
+  addMoreButtonSub: {
+    color: colors.muted,
+    fontSize: 13,
+    marginTop: 2,
   },
   doneButton: {
     backgroundColor: colors.primary,

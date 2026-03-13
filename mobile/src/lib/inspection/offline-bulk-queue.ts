@@ -9,6 +9,7 @@ interface PendingBulkSubmission {
   results: unknown[];
   completionTier?: string;
   notes?: string;
+  events?: unknown[];
   createdAt: number;
 }
 
@@ -55,6 +56,7 @@ export async function enqueueBulkSubmission(params: {
   results: unknown[];
   completionTier?: string;
   notes?: string;
+  events?: unknown[];
 }): Promise<void> {
   const queue = await readQueue();
   queue.push({
@@ -63,6 +65,7 @@ export async function enqueueBulkSubmission(params: {
     results: params.results,
     completionTier: params.completionTier,
     notes: params.notes,
+    events: params.events,
     createdAt: Date.now(),
   });
   await writeQueue(queue);
@@ -84,6 +87,7 @@ export async function flushBulkSubmissionQueue(): Promise<QueueFlushResult> {
         item.results,
         item.completionTier,
         item.notes,
+        item.events,
       );
       flushed++;
     } catch {
