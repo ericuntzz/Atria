@@ -1883,11 +1883,11 @@ const styles = StyleSheet.create({
     fontWeight: "600",
   },
   noteModalSubmit: {
-    flex: 1,
     backgroundColor: colors.primary,
     borderRadius: 12,
     paddingVertical: 14,
     alignItems: "center",
+    justifyContent: "center",
   },
   noteModalSubmitDisabled: {
     opacity: 0.4,
@@ -1929,7 +1929,7 @@ const styles = StyleSheet.create({
     color: colors.muted,
     fontSize: 12,
     marginTop: 2,
-    maxWidth: 200,
+    flexShrink: 1,
   },
   settingsActionButton: {
     backgroundColor: "rgba(77,166,255,0.12)",

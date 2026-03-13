@@ -237,12 +237,16 @@ export function PropertyDetail({
   if (!property) {
     return (
       <AppLayout userEmail={user.email || ""} mobileNav={<MobileNav />}>
-        <div className="p-6">
-          <p className="text-muted-foreground">
-            {error || "Property not found."}
+        <div className="flex flex-col items-center justify-center py-24 px-6 text-center">
+          <div className="rounded-full bg-muted p-4 mb-4">
+            <AlertCircle className="h-8 w-8 text-muted-foreground" />
+          </div>
+          <h2 className="text-lg font-semibold mb-1">Property not found</h2>
+          <p className="text-sm text-muted-foreground mb-6">
+            {error || "This property may have been removed or the link is invalid."}
           </p>
           <Link href="/dashboard">
-            <Button variant="ghost" className="mt-4 gap-2">
+            <Button variant="outline" className="gap-2 rounded-xl">
               <ArrowLeft className="h-4 w-4" /> Back to Properties
             </Button>
           </Link>
@@ -286,7 +290,7 @@ export function PropertyDetail({
             </p>
           )}
           {/* Mobile action buttons */}
-          <div className="flex gap-2 mt-4">
+          <div className="grid grid-cols-2 gap-2 mt-4">
             <Button variant="outline" size="sm" onClick={openEditDialog} className="gap-1.5 rounded-xl h-10">
               <Pencil className="h-4 w-4" />
               Edit
@@ -304,7 +308,7 @@ export function PropertyDetail({
               variant="outline"
               size="sm"
               onClick={() => setViewMode("training")}
-              className="gap-1.5 flex-1 rounded-xl h-10"
+              className="gap-1.5 rounded-xl h-10"
             >
               <Upload className="h-4 w-4" />
               {property.trainingStatus === "trained" ? "Retrain" : "Train AI"}
@@ -313,7 +317,7 @@ export function PropertyDetail({
               <Button
                 size="sm"
                 onClick={handleStartInspection}
-                className="gap-1.5 flex-1 rounded-xl h-10"
+                className="gap-1.5 rounded-xl h-10"
               >
                 <ScanLine className="h-4 w-4" />
                 Inspect

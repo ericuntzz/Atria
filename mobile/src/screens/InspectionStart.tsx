@@ -5,6 +5,7 @@ import {
   TouchableOpacity,
   StyleSheet,
   ActivityIndicator,
+  ScrollView,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useNavigation, useRoute } from "@react-navigation/native";
@@ -117,7 +118,7 @@ export default function InspectionStartScreen() {
         </View>
       )}
 
-      <View style={styles.modes}>
+      <ScrollView style={styles.modes} contentContainerStyle={styles.modesContent} showsVerticalScrollIndicator={false}>
         {MODES.map((mode) => {
           const isSelected = selectedMode === mode.key;
           return (
@@ -191,7 +192,7 @@ export default function InspectionStartScreen() {
             </TouchableOpacity>
           );
         })}
-      </View>
+      </ScrollView>
 
       <TouchableOpacity
         style={[styles.startButton, loading && styles.startButtonDisabled]}
@@ -261,8 +262,11 @@ const styles = StyleSheet.create({
     textDecorationLine: "underline" as const,
   },
   modes: {
-    gap: 10,
     flex: 1,
+  },
+  modesContent: {
+    gap: 10,
+    paddingBottom: 8,
   },
   modeCard: {
     backgroundColor: colors.card,

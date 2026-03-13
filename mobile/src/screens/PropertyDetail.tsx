@@ -759,6 +759,7 @@ const styles = StyleSheet.create({
   typeRow: {
     gap: 8,
     paddingVertical: 2,
+    paddingRight: 8,
   },
   typeChip: {
     paddingHorizontal: 14,

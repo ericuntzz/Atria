@@ -170,12 +170,16 @@ export function InspectionFlow({
   if (!inspection) {
     return (
       <AppLayout userEmail={user.email || ""} mobileNav={<MobileNav />}>
-        <div className="p-6">
-          <p className="text-muted-foreground">
-            {error || "Inspection not found."}
+        <div className="flex flex-col items-center justify-center py-24 px-6 text-center">
+          <div className="rounded-full bg-muted p-4 mb-4">
+            <AlertTriangle className="h-8 w-8 text-muted-foreground" />
+          </div>
+          <h2 className="text-lg font-semibold mb-1">Inspection not found</h2>
+          <p className="text-sm text-muted-foreground mb-6">
+            {error || "This inspection may have been removed or the link is invalid."}
           </p>
           <Link href="/dashboard">
-            <Button variant="ghost" className="mt-4 gap-2">
+            <Button variant="outline" className="gap-2 rounded-xl">
               <ArrowLeft className="h-4 w-4" /> Back to Dashboard
             </Button>
           </Link>

@@ -63,7 +63,7 @@ const EMPTY_RESULT: ComparisonResult = {
   summary: "Not evaluated",
 };
 
-const DEFAULT_HARD_ALIGNMENT_SKIP_THRESHOLD = 0.38;
+const DEFAULT_HARD_ALIGNMENT_SKIP_THRESHOLD = 0.18;
 
 /**
  * Build the expert inspection prompt based on inspection mode and context.

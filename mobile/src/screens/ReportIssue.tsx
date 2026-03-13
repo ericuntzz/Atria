@@ -191,7 +191,7 @@ export default function ReportIssueScreen() {
 
           {/* Info Card */}
           <View style={styles.infoCard}>
-            <Text style={styles.infoTitle}>Included with this report</Text>
+            <Text style={styles.infoTitle}>INCLUDED WITH THIS REPORT</Text>
             <Text style={styles.infoText}>
               {email ? `Account: ${email}` : "Account info"}
               {"\n"}
@@ -353,7 +353,6 @@ const styles = StyleSheet.create({
     color: colors.primary,
     marginBottom: 6,
     letterSpacing: 0.3,
-    textTransform: "uppercase",
   },
   infoText: {
     fontSize: 13,
