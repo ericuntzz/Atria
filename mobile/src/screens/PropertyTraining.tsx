@@ -164,6 +164,7 @@ export default function PropertyTrainingScreen() {
   const [zoom, setZoom] = useState(0);
   const [uploadProgress, setUploadProgress] = useState({ current: 0, total: 0 });
   const [trainingResult, setTrainingResult] = useState<TrainingResult | null>(null);
+  const previousResultRef = useRef<TrainingResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const cameraRef = useRef<CameraView>(null);
   const videoThumbnailsRef = useRef<VideoThumbnailsModule | null>(getVideoThumbnailsModule());
@@ -390,7 +391,12 @@ export default function PropertyTrainingScreen() {
       }
 
       if (captures.length === 0) {
-        setPhase("intro");
+        if (isAddMore && previousResultRef.current) {
+          setTrainingResult(previousResultRef.current);
+          setPhase("results");
+        } else {
+          setPhase("intro");
+        }
         return true;
       }
 
@@ -402,7 +408,15 @@ export default function PropertyTrainingScreen() {
           {
             text: "Discard",
             style: "destructive",
-            onPress: () => navigation.goBack(),
+            onPress: () => {
+              if (isAddMore && previousResultRef.current) {
+                setCaptures([]);
+                setTrainingResult(previousResultRef.current);
+                setPhase("results");
+              } else {
+                navigation.goBack();
+              }
+            },
           },
         ],
       );
@@ -411,7 +425,7 @@ export default function PropertyTrainingScreen() {
 
     const sub = BackHandler.addEventListener("hardwareBackPress", onBackPress);
     return () => sub.remove();
-  }, [phase, captures.length, navigation]);
+  }, [phase, captures.length, isAddMore, navigation]);
 
   const handleStartCapture = useCallback(async () => {
     if (!permission?.granted) {
@@ -1039,6 +1053,7 @@ export default function PropertyTrainingScreen() {
           <TouchableOpacity
             style={styles.addMoreButton}
             onPress={() => {
+              previousResultRef.current = trainingResult;
               setCaptures([]);
               uploadedIdsRef.current.clear();
               setTrainingResult(null);
@@ -1131,10 +1146,21 @@ export default function PropertyTrainingScreen() {
                   {
                     text: "Discard",
                     style: "destructive",
-                    onPress: () => setPhase("intro"),
+                    onPress: () => {
+                      if (isAddMore && previousResultRef.current) {
+                        setCaptures([]);
+                        setTrainingResult(previousResultRef.current);
+                        setPhase("results");
+                      } else {
+                        setPhase("intro");
+                      }
+                    },
                   },
                 ],
               );
+            } else if (isAddMore && previousResultRef.current) {
+              setTrainingResult(previousResultRef.current);
+              setPhase("results");
             } else {
               setPhase("intro");
             }
