@@ -30,6 +30,7 @@ import {
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { CameraView, useCameraPermissions } from "expo-camera";
+import { requireOptionalNativeModule } from "expo-modules-core";
 import { Gesture, GestureDetector } from "react-native-gesture-handler";
 import { runOnJS } from "react-native-reanimated";
 import * as Haptics from "expo-haptics";
@@ -107,25 +108,42 @@ type VideoThumbnailsModule = {
   ) => Promise<{ uri: string }>;
 };
 
-let cachedVideoThumbnailsModule: VideoThumbnailsModule | null | undefined;
+type NativeVideoThumbnailsModule = {
+  getThumbnail: (
+    uri: string,
+    options: { time: number; quality: number },
+  ) => Promise<{ uri: string }>;
+};
 
-async function getVideoThumbnailsModule(): Promise<VideoThumbnailsModule | null> {
+let cachedVideoThumbnailsModule: VideoThumbnailsModule | null | undefined;
+let loggedMissingVideoThumbnailsModule = false;
+
+function getVideoThumbnailsModule(): VideoThumbnailsModule | null {
   if (cachedVideoThumbnailsModule !== undefined) {
     return cachedVideoThumbnailsModule;
   }
 
-  try {
-    const mod = (await import("expo-video-thumbnails")) as VideoThumbnailsModule;
-    cachedVideoThumbnailsModule = mod;
-    return mod;
-  } catch (err) {
+  const nativeModule =
+    requireOptionalNativeModule<NativeVideoThumbnailsModule>("ExpoVideoThumbnails");
+
+  if (!nativeModule) {
+    if (!loggedMissingVideoThumbnailsModule) {
+      loggedMissingVideoThumbnailsModule = true;
+      console.warn(
+        "[PropertyTraining] ExpoVideoThumbnails native module is unavailable in this client build.",
+      );
+    }
     console.warn(
-      "[PropertyTraining] expo-video-thumbnails unavailable in this client build:",
-      err instanceof Error ? err.message : String(err),
+      "[PropertyTraining] Video capture will upload the original video, but training still needs at least one photo unless the dev client is rebuilt.",
     );
     cachedVideoThumbnailsModule = null;
     return null;
   }
+
+  cachedVideoThumbnailsModule = {
+    getThumbnailAsync: (uri, options) => nativeModule.getThumbnail(uri, options),
+  };
+  return cachedVideoThumbnailsModule;
 }
 
 export default function PropertyTrainingScreen() {
@@ -145,6 +163,8 @@ export default function PropertyTrainingScreen() {
   const [trainingResult, setTrainingResult] = useState<TrainingResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const cameraRef = useRef<CameraView>(null);
+  const videoThumbnailsRef = useRef<VideoThumbnailsModule | null>(getVideoThumbnailsModule());
+  const videoSupportAlertShownRef = useRef(false);
   const baseZoomRef = useRef(0);
   const isCapturingRef = useRef(false);
   const isRecordingRef = useRef(false);
@@ -153,6 +173,7 @@ export default function PropertyTrainingScreen() {
   const uploadedIdsRef = useRef<Map<string, string[]>>(new Map());
   const cancelRequestedRef = useRef(false);
   const runIdRef = useRef(0);
+  const videoKeyframesAvailable = videoThumbnailsRef.current !== null;
 
   // ── Processing Screen Animations ──
   const breatheAnim = useRef(new Animated.Value(0)).current;
@@ -436,6 +457,15 @@ export default function PropertyTrainingScreen() {
   // ── Video Recording ──
   const handleStartRecording = useCallback(async () => {
     if (!cameraRef.current || isRecordingRef.current) return;
+
+    if (!videoThumbnailsRef.current && !videoSupportAlertShownRef.current) {
+      videoSupportAlertShownRef.current = true;
+      Alert.alert(
+        "Video Capture Limited",
+        "This app build can record video, but it cannot extract training frames from video yet. Capture at least one photo, or reinstall the latest iOS dev client to enable video keyframes.",
+      );
+    }
+
     isRecordingRef.current = true;
     setIsRecording(true);
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
@@ -481,7 +511,7 @@ export default function PropertyTrainingScreen() {
   }, []);
 
   const extractVideoKeyframeUris = useCallback(async (videoUri: string) => {
-    const videoThumbnails = await getVideoThumbnailsModule();
+    const videoThumbnails = videoThumbnailsRef.current;
     if (!videoThumbnails) {
       return [];
     }
@@ -644,6 +674,14 @@ export default function PropertyTrainingScreen() {
       Alert.alert(
         "More Images Needed",
         "Please capture at least 3 images from different rooms and angles for accurate training.",
+      );
+      return;
+    }
+
+    if (!videoThumbnailsRef.current && captures.every((capture) => capture.type === "video")) {
+      Alert.alert(
+        "Photos Still Required",
+        "This app build cannot turn videos into training frames yet. Capture at least one photo, or reinstall the latest iOS dev client before training.",
       );
       return;
     }
@@ -1089,6 +1127,14 @@ export default function PropertyTrainingScreen() {
               <Text style={styles.errorDismiss}>Dismiss</Text>
             </TouchableOpacity>
           </View>
+        </View>
+      )}
+
+      {!videoKeyframesAvailable && captureMode === "video" && !isRecording && (
+        <View style={styles.infoBanner}>
+          <Text style={styles.infoText}>
+            Video is available, but this build cannot extract training frames from it yet. Add at least one photo or reinstall the latest iOS dev client.
+          </Text>
         </View>
       )}
 
@@ -1782,6 +1828,25 @@ const styles = StyleSheet.create({
     color: "#fff",
     fontWeight: "600",
     fontSize: 14,
+  },
+  infoBanner: {
+    position: "absolute",
+    top: 172,
+    left: 16,
+    right: 16,
+    backgroundColor: "rgba(251, 191, 36, 0.96)",
+    borderRadius: 14,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    zIndex: 18,
+    borderWidth: 1,
+    borderColor: "rgba(251, 191, 36, 0.58)",
+  },
+  infoText: {
+    color: colors.heading,
+    fontSize: 13,
+    lineHeight: 18,
+    fontWeight: "600",
   },
   guidanceContainer: {
     position: "absolute",

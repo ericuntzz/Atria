@@ -275,7 +275,7 @@ export async function compareImages(
       };
     }
 
-    const anthropicKey = process.env.ANTHROPIC_API_KEY;
+    const anthropicKey = process.env.CLAUDE_API_KEY;
     if (!anthropicKey) {
       return {
         ...EMPTY_RESULT,
@@ -328,7 +328,7 @@ export async function compareImages(
       text: buildExpertPrompt(roomName, inspectionMode, knownConditions, currentData.length),
     });
 
-    const aiModel = process.env.ANTHROPIC_VISION_MODEL || "claude-sonnet-4-5-20250514";
+    const aiModel = process.env.ANTHROPIC_VISION_MODEL || "claude-sonnet-4-20250514";
     const aiStartedAt = Date.now();
     const res = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
@@ -346,6 +346,8 @@ export async function compareImages(
     });
 
     if (!res.ok) {
+      const errBody = await res.text().catch(() => "");
+      console.error(`[compare] Anthropic API error: ${res.status} ${res.statusText}`, errBody.slice(0, 300));
       return {
         ...EMPTY_RESULT,
         summary: "Comparison unavailable",

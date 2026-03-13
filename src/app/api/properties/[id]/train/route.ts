@@ -494,7 +494,7 @@ async function analyzePropertyImages(
   imageUrls: string[],
   propertyName: string,
 ): Promise<PropertyAnalysis> {
-  const anthropicKey = process.env.ANTHROPIC_API_KEY;
+  const anthropicKey = process.env.CLAUDE_API_KEY;
 
   if (!anthropicKey) {
     return generateBasicStructure(imageUrls);
@@ -543,7 +543,7 @@ async function analyzePropertyImages(
         "anthropic-version": "2023-06-01",
       },
       body: JSON.stringify({
-        model: "claude-sonnet-4-5-20250514",
+        model: "claude-sonnet-4-20250514",
         max_tokens: 4096,
         messages: [
           {
