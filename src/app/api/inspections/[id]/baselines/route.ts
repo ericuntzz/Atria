@@ -57,6 +57,7 @@ export async function GET(
             id: baselineImages.id,
             roomId: baselineImages.roomId,
             imageUrl: baselineImages.imageUrl,
+            previewUrl: baselineImages.previewUrl,
             label: baselineImages.label,
             embedding: baselineImages.embedding,
             qualityScore: baselineImages.qualityScore,

@@ -146,6 +146,8 @@ export interface ComparisonReceivedPayload {
   findingsCount: number;
   score?: number;
   latencyMs: number;
+  clientSimilarity?: number;
+  topCandidateIds?: string[];
   skippedByPreflight?: boolean;
   preflightReason?: string;
   preflightSsim?: number;

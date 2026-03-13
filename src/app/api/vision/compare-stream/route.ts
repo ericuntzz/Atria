@@ -57,6 +57,8 @@ export async function POST(request: NextRequest) {
     inspectionId,
     roomId,
     baselineImageId,
+    clientSimilarity,
+    topCandidateIds,
   } = body;
 
   if (!baselineUrl || !currentImages || !roomName) {
@@ -181,6 +183,18 @@ export async function POST(request: NextRequest) {
           });
         }
 
+        // Validate new optional fields
+        const validatedClientSimilarity =
+          typeof clientSimilarity === "number" && clientSimilarity >= 0 && clientSimilarity <= 1
+            ? clientSimilarity
+            : undefined;
+        const validatedTopCandidateIds =
+          Array.isArray(topCandidateIds) &&
+          topCandidateIds.every((id: unknown) => typeof id === "string" && isValidUUID(id as string)) &&
+          topCandidateIds.length <= 5
+            ? (topCandidateIds as string[])
+            : undefined;
+
         // Run comparison
         const result = await compareImages({
           baselineImage: baselineUrl as string,
@@ -190,6 +204,8 @@ export async function POST(request: NextRequest) {
           knownConditions: validatedConditions,
           baselineIsBase64: false,
           currentImagesAreBase64: true,
+          topCandidateIds: validatedTopCandidateIds,
+          clientSimilarity: validatedClientSimilarity,
         });
 
         if (inspectionId && roomId && baselineImageId) {
@@ -204,6 +220,8 @@ export async function POST(request: NextRequest) {
               findingsCount: result.findings.length,
               score: result.readiness_score ?? undefined,
               latencyMs: Date.now() - compareStartedAt,
+              clientSimilarity: validatedClientSimilarity,
+              topCandidateIds: validatedTopCandidateIds,
               skippedByPreflight: result.diagnostics?.skippedByPreflight,
               preflightReason: result.diagnostics?.preflight?.reason,
               preflightSsim: result.diagnostics?.preflight?.ssim,

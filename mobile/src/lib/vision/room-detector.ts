@@ -1,8 +1,15 @@
 /**
- * Room Detection + Angle Tracking Engine
+ * Room Detection + Baseline Localization Engine
  *
  * Uses MobileCLIP-S0 embeddings to identify which room the camera is seeing
- * and track which baseline angles have been "scanned" (covered).
+ * and which baseline angle is the best visual match.
+ *
+ * Key behaviors:
+ * - Candidate retrieval: ranks ALL baselines by embedding similarity (not "first unscanned")
+ * - Temporal lock: same top candidate for 3 consecutive frames → locked baseline
+ * - Room is a soft prior: if room confidence < 0.90, all baselines are searched
+ * - Coverage (unscanned) is a tie-breaker only within 0.03 similarity gap
+ * - Angle scanning is NOT done here — only marked after server verification
  *
  * Supports two modes:
  * - Auto mode: ONNX model generates live frame embeddings, cosine similarity matches rooms
@@ -17,6 +24,7 @@ export interface BaselineAngle {
   roomName: string;
   label: string | null; // waypoint name: "sink", "stove", etc.
   imageUrl: string;
+  previewUrl?: string; // 640x360 center-cropped for ghost overlay
   embedding: number[] | null; // 512-dim MobileCLIP embedding
 }
 
@@ -32,19 +40,39 @@ export interface AngleScanResult {
   scanned: boolean;
 }
 
+export interface BaselineCandidate {
+  baselineId: string;
+  similarity: number;
+}
+
+export interface LockedBaselineInfo {
+  baseline: BaselineAngle;
+  similarity: number;
+  isLocked: boolean;
+}
+
 export interface RoomDetectorConfig {
   /** Cosine similarity threshold for room match (default 0.85) */
   roomThreshold: number;
-  /** Cosine similarity threshold for angle scan (default 0.85) */
+  /** Cosine similarity threshold for angle scan — used for diagnostic only (default 0.85) */
   angleThreshold: number;
   /** Consecutive frames needed before switching rooms (default 5) */
   hysteresisFrames: number;
+  /** Consecutive frames needed before locking a baseline candidate (default 3) */
+  baselineLockFrames: number;
+  /** Room confidence below which ALL baselines are searched (default 0.90) */
+  crossRoomFallbackThreshold: number;
+  /** Similarity gap within which coverage breaks ties (default 0.03) */
+  coverageTieBreakGap: number;
 }
 
 const DEFAULT_CONFIG: RoomDetectorConfig = {
   roomThreshold: 0.85,
   angleThreshold: 0.85,
   hysteresisFrames: 5,
+  baselineLockFrames: 3,
+  crossRoomFallbackThreshold: 0.90,
+  coverageTieBreakGap: 0.03,
 };
 
 /**
@@ -69,12 +97,19 @@ export class RoomDetector {
   private config: RoomDetectorConfig;
   private modelLoader: OnnxModelLoader | null = null;
 
-  // Hysteresis state
+  // Room hysteresis state
   private currentRoomId: string | null = null;
   private candidateRoomId: string | null = null;
   private candidateCount = 0;
 
+  // Baseline localization state
+  private candidateBaselineId: string | null = null;
+  private candidateBaselineFrameCount = 0;
+  private lockedBaseline: LockedBaselineInfo | null = null;
+  private currentBaselineScores: BaselineCandidate[] = [];
+
   // Coverage tracking: roomId -> Set of scanned baseline IDs
+  // NOTE: This is only updated externally via markAngleScanned() after server verification
   private scannedAngles = new Map<string, Set<string>>();
   private totalAnglesPerRoom = new Map<string, number>();
 
@@ -138,6 +173,12 @@ export class RoomDetector {
     this.scannedAngles.clear();
     this.totalAnglesPerRoom.clear();
 
+    // Reset baseline lock state
+    this.candidateBaselineId = null;
+    this.candidateBaselineFrameCount = 0;
+    this.lockedBaseline = null;
+    this.currentBaselineScores = [];
+
     // Group by room and count angles
     for (const b of baselines) {
       if (!this.totalAnglesPerRoom.has(b.roomId)) {
@@ -154,7 +195,10 @@ export class RoomDetector {
   /**
    * Identify the current room from a frame embedding.
    * Applies 5-frame hysteresis to prevent flicker.
-   * Also marks angles as scanned if similarity exceeds threshold.
+   * Also updates baseline localization (locked baseline + top-k candidates).
+   *
+   * NOTE: Angle scanning is NOT performed here — baselines are only marked
+   * as scanned via markAngleScanned() after the server verifies a comparison.
    *
    * Returns null if ONNX model is not loaded (embeddings unavailable).
    * In that case, room must be set manually.
@@ -200,7 +244,7 @@ export class RoomDetector {
       }
     }
 
-    // Apply hysteresis
+    // Apply room hysteresis
     let roomChanged = false;
     if (bestRoom && bestRoom.confidence >= this.config.roomThreshold) {
       if (bestRoom.roomId !== this.currentRoomId) {
@@ -211,6 +255,12 @@ export class RoomDetector {
             this.candidateRoomId = null;
             this.candidateCount = 0;
             roomChanged = true;
+
+            // Reset baseline lock on room change
+            this.candidateBaselineId = null;
+            this.candidateBaselineFrameCount = 0;
+            this.lockedBaseline = null;
+            this.currentBaselineScores = [];
           }
         } else {
           this.candidateRoomId = bestRoom.roomId;
@@ -223,16 +273,16 @@ export class RoomDetector {
       }
     }
 
-    // Mark angles as scanned (multi-room buffering at doorways)
+    // Update baseline localization (candidate retrieval + temporal lock)
+    const currentRoomConfidence = this.currentRoomId
+      ? roomScores.get(this.currentRoomId)?.maxSim ?? 0
+      : bestRoom?.confidence ?? 0;
+    this.updateBaselineLock(scores, currentRoomConfidence);
+
+    // Compute diagnostic angle scan results (read-only, no state mutation)
     const anglesScanned: AngleScanResult[] = [];
     for (const { baseline, similarity } of scores) {
-      const scanned = similarity >= this.config.angleThreshold;
-      if (scanned) {
-        const roomAngles = this.scannedAngles.get(baseline.roomId);
-        if (roomAngles) {
-          roomAngles.add(baseline.id);
-        }
-      }
+      const scanned = this.scannedAngles.get(baseline.roomId)?.has(baseline.id) ?? false;
       anglesScanned.push({
         baselineId: baseline.id,
         similarity,
@@ -262,12 +312,140 @@ export class RoomDetector {
   }
 
   /**
+   * Update baseline localization: rank candidates, apply temporal lock.
+   *
+   * Similarity ranks first. Coverage (unscanned) is a tie-breaker only
+   * when candidates are within coverageTieBreakGap of each other.
+   *
+   * Room is a soft prior: if room confidence < crossRoomFallbackThreshold,
+   * all baselines are searched regardless of room assignment.
+   */
+  private updateBaselineLock(
+    scores: Array<{ baseline: BaselineAngle; similarity: number }>,
+    roomConfidence: number,
+  ): void {
+    // Filter to current room baselines, unless room confidence is low → search ALL
+    let candidates = scores;
+    if (
+      this.currentRoomId &&
+      roomConfidence >= this.config.crossRoomFallbackThreshold
+    ) {
+      const roomFiltered = scores.filter(
+        (s) => s.baseline.roomId === this.currentRoomId,
+      );
+      // Only use room filter if it produces results
+      if (roomFiltered.length > 0) {
+        candidates = roomFiltered;
+      }
+    }
+
+    // Sort by similarity descending
+    candidates = [...candidates].sort((a, b) => b.similarity - a.similarity);
+
+    // Store all scores for telemetry
+    this.currentBaselineScores = candidates.map((c) => ({
+      baselineId: c.baseline.id,
+      similarity: c.similarity,
+    }));
+
+    if (candidates.length === 0) {
+      this.lockedBaseline = null;
+      this.candidateBaselineId = null;
+      this.candidateBaselineFrameCount = 0;
+      return;
+    }
+
+    // Apply coverage tie-breaking within the gap threshold
+    let topCandidate = candidates[0];
+    if (candidates.length > 1) {
+      const gap = candidates[0].similarity - candidates[1].similarity;
+      if (gap < this.config.coverageTieBreakGap) {
+        const firstScanned = this.isBaselineScanned(candidates[0].baseline);
+        const secondScanned = this.isBaselineScanned(candidates[1].baseline);
+        // Prefer unscanned only when similarity is nearly tied
+        if (firstScanned && !secondScanned) {
+          topCandidate = candidates[1];
+        }
+      }
+    }
+
+    // Temporal smoothing: same candidate for N frames → locked
+    if (topCandidate.baseline.id === this.candidateBaselineId) {
+      this.candidateBaselineFrameCount++;
+    } else {
+      this.candidateBaselineId = topCandidate.baseline.id;
+      this.candidateBaselineFrameCount = 1;
+    }
+
+    const isLocked =
+      this.candidateBaselineFrameCount >= this.config.baselineLockFrames;
+    this.lockedBaseline = {
+      baseline: topCandidate.baseline,
+      similarity: topCandidate.similarity,
+      isLocked,
+    };
+  }
+
+  /**
+   * Check if a baseline has been marked as scanned (server-verified).
+   */
+  private isBaselineScanned(baseline: BaselineAngle): boolean {
+    return this.scannedAngles.get(baseline.roomId)?.has(baseline.id) ?? false;
+  }
+
+  // ─── Public API: Baseline Localization ──────────────────────────
+
+  /**
+   * Get the currently locked baseline (or best candidate if not yet locked).
+   * Returns null if no baselines have any similarity.
+   */
+  getLockedBaseline(): LockedBaselineInfo | null {
+    return this.lockedBaseline;
+  }
+
+  /**
+   * Get the top-k baseline candidates by similarity.
+   * Used to send candidate IDs to the server for geometric verification.
+   */
+  getTopCandidates(k: number): BaselineCandidate[] {
+    return this.currentBaselineScores.slice(0, k);
+  }
+
+  /**
+   * Get all current baseline scores for telemetry.
+   */
+  getCurrentBaselineScores(): BaselineCandidate[] {
+    return this.currentBaselineScores;
+  }
+
+  /**
+   * Manually mark a baseline angle as scanned.
+   * Call this ONLY after the server has verified the comparison — never from
+   * the embedding loop. This ensures coverage tracking reflects actual verified
+   * comparisons, not just visual similarity.
+   */
+  markAngleScanned(baselineId: string, roomId: string): void {
+    const roomAngles = this.scannedAngles.get(roomId);
+    if (roomAngles) {
+      roomAngles.add(baselineId);
+    }
+  }
+
+  // ─── Public API: Room Detection ─────────────────────────────────
+
+  /**
    * Manually set the current room (fallback when embeddings unavailable).
    */
   setCurrentRoom(roomId: string) {
     this.currentRoomId = roomId;
     this.candidateRoomId = null;
     this.candidateCount = 0;
+
+    // Reset baseline lock when room is manually changed
+    this.candidateBaselineId = null;
+    this.candidateBaselineFrameCount = 0;
+    this.lockedBaseline = null;
+    this.currentBaselineScores = [];
   }
 
   /**

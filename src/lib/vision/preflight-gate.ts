@@ -119,21 +119,10 @@ export async function runPreflightGate(
       diffPixelThreshold,
     );
 
-    if (score < minAlignmentScore) {
-      return {
-        gateVersion: "preflight-v1",
-        shouldCallAi: true,
-        reason: "alignment_low_confidence",
-        ssim,
-        diffPercent,
-        alignment: { dx, dy, score, maxShift },
-        thresholds: {
-          ssim: ssimThreshold,
-          diffPercent: diffPercentThreshold,
-          minAlignmentScore,
-        },
-      };
-    }
+    // NOTE: alignment_low_confidence is no longer a gate/skip reason.
+    // Geometric verification (ORB + RANSAC) in the compare pipeline handles
+    // view matching. The preflight gate now only detects "has anything changed?"
+    // The alignment score is still computed and reported as a diagnostic metric.
 
     if (diffPercent >= diffPercentThreshold) {
       return {

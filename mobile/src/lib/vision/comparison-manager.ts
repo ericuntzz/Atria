@@ -207,6 +207,10 @@ export class ComparisonManager {
       triggerSource?: ComparisonTriggerSource;
       apiUrl: string;
       authToken: string;
+      /** Telemetry only — server will verify independently */
+      clientSimilarity?: number;
+      /** Baseline IDs for server to resolve and verify (top-k candidates) */
+      topCandidateIds?: string[];
     },
     cropFrame?: CropFrameFn,
   ) {
@@ -257,6 +261,8 @@ export class ComparisonManager {
           inspectionId: options.inspectionId,
           roomId,
           baselineImageId: options.baselineImageId,
+          clientSimilarity: options.clientSimilarity,
+          topCandidateIds: options.topCandidateIds,
         }),
       });
 

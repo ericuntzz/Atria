@@ -11,6 +11,7 @@ import {
   TextInput,
   KeyboardAvoidingView,
   Platform,
+  Image,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { CameraView, useCameraPermissions } from "expo-camera";
@@ -33,7 +34,7 @@ import {
 import { ComparisonManager } from "../lib/vision/comparison-manager";
 import { MotionFilter } from "../lib/sensors/motion-filter";
 import { ChangeDetector } from "../lib/vision/change-detector";
-import { RoomDetector } from "../lib/vision/room-detector";
+import { RoomDetector, type BaselineCandidate } from "../lib/vision/room-detector";
 import { loadOnnxModel, type OnnxModelLoader } from "../lib/vision/onnx-model";
 import {
   getInspectionBaselines,
@@ -59,6 +60,7 @@ interface RoomBaseline {
   baselines: Array<{
     id: string;
     imageUrl: string;
+    previewUrl?: string;
     label: string | null;
     embedding: number[] | null;
   }>;
@@ -66,6 +68,31 @@ interface RoomBaseline {
 
 const CHANGE_FRAME_WIDTH = 320;
 const CHANGE_FRAME_HEIGHT = 240;
+
+type LocalizationState =
+  | "not_localized"        // No candidate above 0.70
+  | "localizing"           // Candidate found, smoothing (< 3 frames)
+  | "ambiguous"            // Top-2 candidates within 0.05 of each other
+  | "localized"            // Locked, similarity ≥ 0.85
+  | "capturing"            // Comparison in flight
+  | "verification_failed"; // Server could not geometrically verify this view
+
+function getSimilarityColor(similarity: number): string {
+  if (similarity >= 0.85) return "#22c55e"; // green
+  if (similarity >= 0.70) return "#eab308"; // yellow
+  return "#ef4444"; // red
+}
+
+function getLocalizationGuidance(state: LocalizationState): string | null {
+  switch (state) {
+    case "not_localized": return "Point camera at a trained area";
+    case "localizing": return "Hold steady...";
+    case "ambiguous": return "Move closer to distinguish views";
+    case "localized": return null;
+    case "capturing": return "Analyzing...";
+    case "verification_failed": return "Try a slightly different angle";
+  }
+}
 
 export default function InspectionCameraScreen() {
   const navigation = useNavigation<Nav>();
@@ -93,6 +120,15 @@ export default function InspectionCameraScreen() {
   const [showSettingsModal, setShowSettingsModal] = useState(false);
   const [noteText, setNoteText] = useState("");
   const [captureHint, setCaptureHint] = useState<string | null>(null);
+  const [localizationState, setLocalizationState] = useState<LocalizationState>("not_localized");
+  const [lockedBaselineInfo, setLockedBaselineInfo] = useState<{
+    baselineId: string;
+    imageUrl: string;
+    label: string | null;
+    similarity: number;
+    isLocked: boolean;
+    topCandidates: BaselineCandidate[];
+  } | null>(null);
   const [zoom, setZoom] = useState(0);
   const [roomWaypoints, setRoomWaypoints] = useState<
     Array<{ id: string; label: string | null; scanned: boolean }>
@@ -196,13 +232,16 @@ export default function InspectionCameraScreen() {
           triggerSource,
           summary: result.summary,
         });
-        showCaptureHint("Angle mismatch. Move closer to the saved baseline view.");
+        setLocalizationState("verification_failed");
+        showCaptureHint("Try a slightly different angle");
         void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
         return;
       }
 
+      // Only mark angle as scanned after server-verified comparison
       if (baselineImageId) {
         session.recordAngleScan(roomId, baselineImageId);
+        roomDetectorRef.current?.markAngleScanned(baselineImageId, roomId);
         updateCoverageUI(session, roomId);
         if ((result.findings?.length || 0) === 0) {
           autoAdvanceIfRoomComplete(session, roomId);
@@ -415,6 +454,7 @@ export default function InspectionCameraScreen() {
           baselineImages?: Array<{
             id: string;
             imageUrl: string;
+            previewUrl?: string | null;
             label: string | null;
             embedding: number[] | null;
           }>;
@@ -427,6 +467,7 @@ export default function InspectionCameraScreen() {
             baselines: (room.baselineImages || []).map((bl) => ({
               id: bl.id,
               imageUrl: bl.imageUrl,
+              previewUrl: bl.previewUrl || undefined,
               label: bl.label || null,
               embedding: bl.embedding || null,
             })),
@@ -445,6 +486,7 @@ export default function InspectionCameraScreen() {
               roomName: room.roomName,
               label: b.label,
               imageUrl: b.imageUrl,
+              previewUrl: b.previewUrl,
               embedding: b.embedding,
             })),
           );
@@ -531,20 +573,39 @@ export default function InspectionCameraScreen() {
               void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
             }
 
-            // Update angle scanning from room detector
-            if (result?.anglesScanned) {
-              for (const angle of result.anglesScanned) {
-                if (angle.scanned) {
-                  // Find the room that owns this baseline in a single pass
-                  const ownerRoom = baselinesRef.current.find((r) =>
-                    r.baselines.some((b) => b.id === angle.baselineId),
-                  );
-                  if (ownerRoom) {
-                    session.recordAngleScan(ownerRoom.roomId, angle.baselineId);
-                    updateCoverageUI(session, ownerRoom.roomId);
-                  }
-                }
+            // Update baseline localization state from detector
+            const locked = detector.getLockedBaseline();
+            const topK = detector.getTopCandidates(3);
+
+            if (locked) {
+              setLockedBaselineInfo({
+                baselineId: locked.baseline.id,
+                imageUrl: locked.baseline.previewUrl || locked.baseline.imageUrl,
+                label: locked.baseline.label,
+                similarity: locked.similarity,
+                isLocked: locked.isLocked,
+                topCandidates: topK,
+              });
+
+              // Determine localization state
+              const gap = topK.length >= 2
+                ? topK[0].similarity - topK[1].similarity
+                : 1;
+
+              if (locked.similarity < 0.70) {
+                setLocalizationState("not_localized");
+              } else if (!locked.isLocked) {
+                setLocalizationState("localizing");
+              } else if (gap < 0.05) {
+                setLocalizationState("ambiguous");
+              } else if (locked.similarity >= 0.85) {
+                setLocalizationState("localized");
+              } else {
+                setLocalizationState("localizing");
               }
+            } else {
+              setLockedBaselineInfo(null);
+              setLocalizationState("not_localized");
             }
           }
         } catch {
@@ -623,16 +684,29 @@ export default function InspectionCameraScreen() {
       );
       if (!room?.baselines?.length) return;
 
-      // Pick an unscanned angle, or fall back to first
+      // Use locked baseline from detector (similarity-first, not blind "first unscanned")
+      const detector = roomDetectorRef.current;
+      const locked = detector?.getLockedBaseline();
+
+      // Auto-capture only when localized with high similarity (≥ 0.88)
+      if (!locked?.isLocked || locked.similarity < 0.88) return;
+
+      // Don't auto-capture if ambiguous (top-2 too close)
+      const topK = detector?.getTopCandidates(3) || [];
+      if (topK.length >= 2) {
+        const gap = topK[0].similarity - topK[1].similarity;
+        if (gap < 0.05) return;
+      }
+
+      const baseline = room.baselines.find(b => b.id === locked.baseline.id) || room.baselines[0];
+
+      // Check if all angles are scanned for auto-advance
       const visit = state.visitedRooms.get(currentRoomId);
-      const unscanned = room.baselines.find(
-        (b) => !visit?.anglesScanned.has(b.id),
-      );
-      if (!unscanned && autoCaptureEnabledRef.current) {
+      const allScanned = room.baselines.every(b => visit?.anglesScanned.has(b.id));
+      if (allScanned && autoCaptureEnabledRef.current) {
         autoAdvanceIfRoomComplete(session, currentRoomId);
         return;
       }
-      const baseline = unscanned || room.baselines[0];
 
       // Feed lightweight change detection before expensive burst capture.
       const changeFrame = await captureChangeFrame();
@@ -682,8 +756,11 @@ export default function InspectionCameraScreen() {
       session.recordEvent("comparison_requested", currentRoomId, {
         baselineImageId: baseline.id,
         triggerSource: "auto",
+        lockedSimilarity: locked.similarity,
+        topCandidates: topK.map(c => ({ id: c.baselineId, sim: c.similarity })),
       });
 
+      setLocalizationState("capturing");
       void comparison.triggerComparison(
         captureFrame,
         baseline.imageUrl,
@@ -697,6 +774,8 @@ export default function InspectionCameraScreen() {
           triggerSource: "auto",
           apiUrl,
           authToken: authSession.access_token,
+          clientSimilarity: locked.similarity,
+          topCandidateIds: topK.slice(0, 3).map(c => c.baselineId),
         },
       );
     },
@@ -962,18 +1041,18 @@ export default function InspectionCameraScreen() {
     const room = baselinesRef.current.find((r) => r.roomId === currentRoomId);
     if (!room?.baselines?.length) return;
 
-    const visit = state.visitedRooms.get(currentRoomId);
-    const unscanned = room.baselines.find(
-      (b) => !visit?.anglesScanned.has(b.id),
-    );
-    if (!unscanned && autoCaptureEnabled) {
-      autoAdvanceIfRoomComplete(session, currentRoomId);
+    // Manual capture uses the locked baseline from detector
+    // It does NOT bypass localization — it means "attempt localization now"
+    const detector = roomDetectorRef.current;
+    const locked = detector?.getLockedBaseline();
+    const topK = detector?.getTopCandidates(3) || [];
+
+    if (!locked || locked.similarity < 0.50) {
+      showCaptureHint("Point camera at a trained area first.");
       return;
     }
-    const baseline = unscanned || room.baselines[0];
-    if (!unscanned) {
-      showCaptureHint("Room coverage complete. Use Settings to switch rooms.");
-    }
+
+    const baseline = room.baselines.find(b => b.id === locked.baseline.id) || room.baselines[0];
 
     if (!comparison.shouldTrigger()) {
       showCaptureHint("Hold steady or wait a moment before capturing again.");
@@ -1017,8 +1096,11 @@ export default function InspectionCameraScreen() {
     session.recordEvent("comparison_requested", currentRoomId, {
       baselineImageId: baseline.id,
       triggerSource: "manual",
+      lockedSimilarity: locked?.similarity,
+      topCandidates: topK.map(c => ({ id: c.baselineId, sim: c.similarity })),
     });
 
+    setLocalizationState("capturing");
     void comparison.triggerComparison(
       captureFrame,
       baseline.imageUrl,
@@ -1032,11 +1114,11 @@ export default function InspectionCameraScreen() {
         triggerSource: "manual",
         apiUrl,
         authToken: authSession.access_token,
+        clientSimilarity: locked?.similarity,
+        topCandidateIds: topK.slice(0, 3).map(c => c.baselineId),
       },
     );
   }, [
-    autoAdvanceIfRoomComplete,
-    autoCaptureEnabled,
     paused,
     isProcessing,
     inspectionMode,
@@ -1171,6 +1253,91 @@ export default function InspectionCameraScreen() {
           />
         </View>
       </GestureDetector>
+
+      {/* Ghost overlay — shows target baseline when localized */}
+      {lockedBaselineInfo && !paused && localizationState !== "not_localized" && (
+        <View style={styles.ghostOverlay} pointerEvents="none">
+          {(localizationState === "localized" || localizationState === "localizing" || localizationState === "capturing") && (
+            <>
+              <Image
+                source={{ uri: lockedBaselineInfo.imageUrl }}
+                style={[
+                  StyleSheet.absoluteFill,
+                  { opacity: lockedBaselineInfo.isLocked ? 0.25 : 0.15 },
+                ]}
+                resizeMode="cover"
+              />
+              <View
+                style={[
+                  StyleSheet.absoluteFill,
+                  {
+                    borderColor: getSimilarityColor(lockedBaselineInfo.similarity),
+                    borderWidth: lockedBaselineInfo.isLocked ? 3 : 2,
+                  },
+                ]}
+              />
+            </>
+          )}
+
+          {/* Baseline thumbnail (bottom-left) */}
+          <View style={styles.baselineThumbnail}>
+            <Image
+              source={{ uri: lockedBaselineInfo.imageUrl }}
+              style={{ width: 72, height: 54, borderRadius: 6 }}
+              resizeMode="cover"
+            />
+            <Text style={styles.baselineThumbnailLabel} numberOfLines={1}>
+              {lockedBaselineInfo.label || "Target view"}
+            </Text>
+          </View>
+
+          {/* Similarity badge (bottom-right) */}
+          <View style={styles.similarityBadge}>
+            <View
+              style={[
+                styles.similarityDot,
+                { backgroundColor: getSimilarityColor(lockedBaselineInfo.similarity) },
+              ]}
+            />
+            <Text style={styles.similarityText}>
+              {Math.round(lockedBaselineInfo.similarity * 100)}%
+            </Text>
+          </View>
+
+          {/* Ambiguous: dual thumbnails when top-2 are too close */}
+          {localizationState === "ambiguous" && lockedBaselineInfo.topCandidates.length >= 2 && (
+            <View style={styles.ambiguousThumbnails}>
+              {lockedBaselineInfo.topCandidates.slice(0, 2).map((candidate) => {
+                const bl = baselinesRef.current
+                  .flatMap(r => r.baselines)
+                  .find(b => b.id === candidate.baselineId);
+                if (!bl) return null;
+                return (
+                  <View key={candidate.baselineId} style={styles.ambiguousThumb}>
+                    <Image
+                      source={{ uri: bl.imageUrl }}
+                      style={{ width: 64, height: 48, borderRadius: 6 }}
+                      resizeMode="cover"
+                    />
+                    <Text style={styles.ambiguousThumbScore}>
+                      {Math.round(candidate.similarity * 100)}%
+                    </Text>
+                  </View>
+                );
+              })}
+            </View>
+          )}
+        </View>
+      )}
+
+      {/* Localization guidance */}
+      {!paused && localizationState !== "localized" && localizationState !== "capturing" && (
+        <View style={styles.localizationGuide} pointerEvents="none">
+          <Text style={styles.localizationGuideText}>
+            {getLocalizationGuidance(localizationState)}
+          </Text>
+        </View>
+      )}
 
       {/* Zoom indicator */}
       {zoom > 0.01 && (
@@ -1975,5 +2142,82 @@ const styles = StyleSheet.create({
     color: colors.primaryForeground,
     fontSize: 16,
     fontWeight: "600",
+  },
+  // ── Ghost Overlay + Localization ──
+  ghostOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    zIndex: 3,
+  },
+  baselineThumbnail: {
+    position: "absolute",
+    bottom: 140,
+    left: 16,
+    backgroundColor: "rgba(0,0,0,0.7)",
+    borderRadius: 8,
+    padding: 4,
+    alignItems: "center",
+  },
+  baselineThumbnailLabel: {
+    color: "rgba(255,255,255,0.8)",
+    fontSize: 10,
+    fontWeight: "500",
+    marginTop: 2,
+    maxWidth: 72,
+  },
+  similarityBadge: {
+    position: "absolute",
+    bottom: 140,
+    right: 16,
+    backgroundColor: "rgba(0,0,0,0.7)",
+    borderRadius: 12,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+  },
+  similarityDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+  },
+  similarityText: {
+    color: "#fff",
+    fontSize: 13,
+    fontWeight: "600",
+  },
+  ambiguousThumbnails: {
+    position: "absolute",
+    bottom: 140,
+    alignSelf: "center",
+    flexDirection: "row",
+    gap: 12,
+    backgroundColor: "rgba(0,0,0,0.7)",
+    borderRadius: 10,
+    padding: 8,
+  },
+  ambiguousThumb: {
+    alignItems: "center",
+  },
+  ambiguousThumbScore: {
+    color: "#fff",
+    fontSize: 10,
+    fontWeight: "600",
+    marginTop: 2,
+  },
+  localizationGuide: {
+    position: "absolute",
+    bottom: "30%",
+    alignSelf: "center",
+    backgroundColor: "rgba(0,0,0,0.65)",
+    borderRadius: 10,
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    zIndex: 4,
+  },
+  localizationGuideText: {
+    color: "rgba(255,255,255,0.9)",
+    fontSize: 13,
+    fontWeight: "500",
   },
 });

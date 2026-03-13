@@ -150,6 +150,13 @@ export const baselineImages = pgTable("baseline_images", {
   embedding: jsonb("embedding").$type<number[]>(), // 512-dim MobileCLIP embedding
   qualityScore: real("quality_score"), // Laplacian variance blur score
   embeddingModelVersion: text("embedding_model_version"), // track which model generated the embedding
+  previewUrl: text("preview_url"), // 640x360 center-cropped for ghost overlay
+  verificationImageUrl: text("verification_image_url"), // 640x480 grayscale for geometric verify
+  metadata: jsonb("metadata").$type<{
+    captureOrientation?: { pitch: number; yaw: number; roll: number };
+    captureSequence?: number;
+    captureHeading?: number;
+  }>(),
   createdAt: timestamp("created_at").defaultNow(),
 }, (table) => [
   index("idx_baseline_images_room_id").on(table.roomId),

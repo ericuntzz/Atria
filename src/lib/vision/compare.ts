@@ -9,6 +9,12 @@ import {
   runPreflightGate,
   type PreflightGateResult,
 } from "@/lib/vision/preflight-gate";
+import {
+  JsfeatVerifier,
+  imageToGrayscale,
+  runVerificationCascade,
+  type GeometricVerifyResult,
+} from "@/lib/vision/geometric-verify";
 
 export interface ComparisonFinding {
   category: "missing" | "moved" | "cleanliness" | "damage" | "inventory" | "operational" | "safety" | "restock" | "presentation";
@@ -29,6 +35,14 @@ export interface ComparisonResult {
     aiLatencyMs?: number;
     skippedByPreflight?: boolean;
     preflight?: PreflightGateResult;
+    geometricVerification?: {
+      verified: boolean;
+      inlierCount: number;
+      inlierRatio: number;
+      inlierSpread: number;
+      overlapArea: number;
+      rejectionReasons: string[];
+    };
   };
 }
 
@@ -54,6 +68,10 @@ export interface CompareImagesOptions {
   baselineIsBase64?: boolean;
   /** Override for current image source format */
   currentImagesAreBase64?: boolean;
+  /** Baseline IDs for server to resolve and verify (top-k candidates from mobile) */
+  topCandidateIds?: string[];
+  /** Client-side embedding similarity — telemetry only, never used for gating */
+  clientSimilarity?: number;
 }
 
 // Failure result: null score signals "not evaluated" (never confused with a pass)
@@ -63,7 +81,14 @@ const EMPTY_RESULT: ComparisonResult = {
   summary: "Not evaluated",
 };
 
-const DEFAULT_HARD_ALIGNMENT_SKIP_THRESHOLD = 0.18;
+// Geometric verifier singleton (lazy-init, reused across requests)
+let verifierInstance: JsfeatVerifier | null = null;
+function getVerifier(): JsfeatVerifier {
+  if (!verifierInstance) {
+    verifierInstance = new JsfeatVerifier();
+  }
+  return verifierInstance;
+}
 
 /**
  * Build the expert inspection prompt based on inspection mode and context.
@@ -305,33 +330,67 @@ export async function compareImages(
       return { ...EMPTY_RESULT, summary: "Current image unavailable" };
     }
 
-    // Run preflight alignment + perceptual gate on baseline vs first current frame.
+    // Run geometric verification if we have image data
+    let geometricResult: GeometricVerifyResult | null = null;
+    try {
+      const baselineBuffer = Buffer.from(baselineData.base64, "base64");
+      const currentBuffer = Buffer.from(validCurrentData[0].base64, "base64");
+
+      const baselineGray = await imageToGrayscale(baselineBuffer);
+      const currentGray = await imageToGrayscale(currentBuffer);
+
+      const verifier = getVerifier();
+      const targetWidth = Math.min(baselineGray.width, currentGray.width);
+      const targetHeight = Math.min(baselineGray.height, currentGray.height);
+
+      geometricResult = await verifier.verify(
+        baselineGray.gray,
+        currentGray.gray,
+        targetWidth,
+        targetHeight,
+      );
+
+      // If geometric verification fails, return localization_failed
+      if (!geometricResult.verified) {
+        return {
+          findings: [],
+          summary: geometricResult.userGuidance,
+          readiness_score: null,
+          diagnostics: {
+            skippedByPreflight: true,
+            preflight: {
+              gateVersion: "preflight-v1" as const,
+              shouldCallAi: false,
+              reason: "alignment_low_confidence" as const,
+              ssim: 0,
+              diffPercent: 0,
+              alignment: { dx: 0, dy: 0, score: 0, maxShift: 0 },
+              thresholds: { ssim: 0, diffPercent: 0, minAlignmentScore: 0 },
+            },
+            model: "geometric-verify",
+            geometricVerification: {
+              verified: geometricResult.verified,
+              inlierCount: geometricResult.inlierCount,
+              inlierRatio: geometricResult.inlierRatio,
+              inlierSpread: geometricResult.inlierSpread,
+              overlapArea: geometricResult.overlapArea,
+              rejectionReasons: geometricResult.rejectionReasons,
+            },
+          },
+        };
+      }
+    } catch (geoErr) {
+      // Geometric verification failed — log but continue with preflight gate
+      // Fail-open for now during rollout; will become fail-closed once stable
+      console.warn("[compare] Geometric verification error (falling through):", geoErr);
+    }
+
+    // Run preflight change-detection gate on baseline vs first current frame.
+    // Purpose is now ONLY "has anything changed?" — not view matching.
     const preflight = await runPreflightGate({
       baselineBase64: baselineData.base64,
       currentBase64: validCurrentData[0].base64,
     });
-
-    const hardAlignmentSkipThreshold = envNumber(
-      "VISION_PREFLIGHT_HARD_ALIGNMENT_SKIP_THRESHOLD",
-      DEFAULT_HARD_ALIGNMENT_SKIP_THRESHOLD,
-    );
-
-    if (
-      preflight?.reason === "alignment_low_confidence" &&
-      preflight.alignment.score < hardAlignmentSkipThreshold
-    ) {
-      return {
-        findings: [],
-        summary:
-          "Current frame does not match the saved baseline angle closely enough yet.",
-        readiness_score: null,
-        diagnostics: {
-          skippedByPreflight: true,
-          preflight,
-          model: "preflight-gate",
-        },
-      };
-    }
 
     if (preflight && !preflight.shouldCallAi) {
       return {
