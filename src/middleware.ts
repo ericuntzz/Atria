@@ -24,7 +24,13 @@ export async function middleware(request: NextRequest) {
     });
   }
 
-  const response = await updateSession(request);
+  let response: NextResponse;
+  try {
+    response = await updateSession(request);
+  } catch (err) {
+    console.error("[middleware] updateSession failed:", err);
+    response = NextResponse.next({ request });
+  }
 
   // Add CORS headers to API responses (mobile app needs these in all environments)
   if (request.nextUrl.pathname.startsWith("/api/")) {
