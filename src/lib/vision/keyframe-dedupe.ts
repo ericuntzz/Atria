@@ -8,8 +8,7 @@
 import { fetchImageBuffer } from "./fetch-image";
 
 // Cache sharp import to avoid repeated dynamic import overhead on cold starts
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-let _sharpModule: any = null;
+let _sharpModule: ((input?: Buffer | Uint8Array | string) => any) | null = null;
 async function getSharp() {
   if (!_sharpModule) {
     _sharpModule = (await import("sharp")).default;

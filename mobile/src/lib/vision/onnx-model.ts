@@ -22,6 +22,8 @@ export type EmbeddingResult = Float32Array;
 export interface OnnxModelLoader {
   /** Whether the model loaded successfully */
   isLoaded: boolean;
+  /** User-facing reason the on-device model is unavailable */
+  unavailableReason?: string;
   /** Generate a 512-dim embedding from an image URI */
   generateEmbedding: (imageUri: string) => Promise<EmbeddingResult | null>;
   /** Clean up model resources */
@@ -43,13 +45,15 @@ export async function loadOnnxModel(): Promise<OnnxModelLoader> {
     const Asset = (await import("expo-asset")).Asset;
     const modelAsset = Asset.fromModule(
       // eslint-disable-next-line @typescript-eslint/no-require-imports
-      require("../../../../assets/models/mobileclip-s0.onnx")
+      require("../../../assets/models/mobileclip-s0.onnx")
     );
     await modelAsset.downloadAsync();
 
     if (!modelAsset.localUri) {
       console.warn("[onnx-model] Model asset has no local URI");
-      return createStubLoader();
+      return createStubLoader(
+        "AI inspection requires the Atria dev build. Open the dev build instead of Expo Go.",
+      );
     }
 
     const session = await ort.InferenceSession.create(modelAsset.localUri);
@@ -127,20 +131,26 @@ export async function loadOnnxModel(): Promise<OnnxModelLoader> {
       },
     };
   } catch (error) {
+    const message = (error as Error).message || "Unknown model load failure";
     console.warn(
       "[onnx-model] Failed to load ONNX model (expected if model not bundled):",
-      (error as Error).message,
+      message,
     );
-    return createStubLoader();
+    return createStubLoader(
+      /native module|expo go|onnxruntime|cannot find module/i.test(message)
+        ? "AI inspection requires the Atria dev build. Expo Go cannot run the on-device vision model."
+        : "AI inspection is unavailable in this app runtime. Open the latest Atria dev build and try again.",
+    );
   }
 }
 
 /**
  * Create a stub loader when the model isn't available.
  */
-function createStubLoader(): OnnxModelLoader {
+function createStubLoader(unavailableReason?: string): OnnxModelLoader {
   return {
     isLoaded: false,
+    unavailableReason,
     async generateEmbedding() {
       return null;
     },

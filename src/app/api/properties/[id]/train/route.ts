@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { createClient as createSupabaseClient, type SupabaseClient } from "@supabase/supabase-js";
 import { getDbUser, isValidUUID, isSafeUrl } from "@/lib/auth";
 import { db } from "@/server/db";
 import {
@@ -18,11 +19,137 @@ import {
 } from "@/lib/vision/embeddings";
 import { computeQualityScore } from "@/lib/vision/quality";
 import { dedupeNearDuplicateImages } from "@/lib/vision/keyframe-dedupe";
+import { fetchImageBuffer } from "@/lib/vision/fetch-image";
 
 const KEYFRAME_DEDUPE_MIN_IMAGES = 4;
 const KEYFRAME_DEDUPE_MIN_KEEP = 3;
 const ALLOW_PLACEHOLDER_EMBEDDINGS =
   process.env.ALLOW_PLACEHOLDER_EMBEDDINGS === "1";
+const MIN_USABLE_BASELINE_RATIO = 0.5;
+const PREVIEW_WIDTH = 640;
+const PREVIEW_HEIGHT = 360;
+const VERIFICATION_WIDTH = 480;
+const VERIFICATION_HEIGHT = 360;
+
+function createStorageAdminClient(): SupabaseClient | null {
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+  if (!supabaseUrl || !serviceRoleKey) {
+    return null;
+  }
+
+  return createSupabaseClient(supabaseUrl, serviceRoleKey, {
+    auth: {
+      persistSession: false,
+      autoRefreshToken: false,
+    },
+  });
+}
+
+function isBucketMissingError(message: string): boolean {
+  const normalized = message.toLowerCase();
+  return normalized.includes("not found") || normalized.includes("bucket");
+}
+
+function isTransientUploadError(message: string): boolean {
+  const normalized = message.toLowerCase();
+  return (
+    normalized.includes("fetch failed") ||
+    normalized.includes("network") ||
+    normalized.includes("timed out") ||
+    normalized.includes("timeout") ||
+    normalized.includes("econnreset") ||
+    normalized.includes("socket")
+  );
+}
+
+async function uploadToPropertyMediaWithRetry(
+  supabase: SupabaseClient,
+  path: string,
+  data: Buffer,
+  contentType: string,
+): Promise<string | null> {
+  let lastMessage = "Upload failed";
+
+  for (let attempt = 1; attempt <= STORAGE_UPLOAD_RETRIES; attempt++) {
+    const { error } = await supabase.storage
+      .from("property-media")
+      .upload(path, data, { contentType, upsert: true });
+
+    if (!error) {
+      const {
+        data: { publicUrl },
+      } = supabase.storage.from("property-media").getPublicUrl(path);
+      return publicUrl;
+    }
+
+    lastMessage = error.message || lastMessage;
+
+    if (isBucketMissingError(lastMessage)) {
+      await supabase.storage.createBucket("property-media", { public: true }).catch(() => {});
+      continue;
+    }
+
+    if (isTransientUploadError(lastMessage) && attempt < STORAGE_UPLOAD_RETRIES) {
+      await new Promise((resolve) => setTimeout(resolve, 400 * attempt));
+      continue;
+    }
+
+    break;
+  }
+
+  console.warn("[train] Failed to upload derived baseline asset:", lastMessage);
+  return null;
+}
+
+async function generateDerivedBaselineAssets(
+  supabase: SupabaseClient | null,
+  propertyId: string,
+  baselineId: string,
+  imageUrl: string,
+): Promise<{ previewUrl?: string; verificationImageUrl?: string }> {
+  if (!supabase) {
+    return {};
+  }
+
+  const sourceBuffer = await fetchImageBuffer(imageUrl);
+  if (!sourceBuffer) {
+    return {};
+  }
+
+  const sharp = (await import("sharp")).default;
+  const [previewBuffer, verificationBuffer] = await Promise.all([
+    sharp(sourceBuffer)
+      .rotate()
+      .resize(PREVIEW_WIDTH, PREVIEW_HEIGHT, { fit: "cover", position: "centre" })
+      .jpeg({ quality: 82 })
+      .toBuffer(),
+    sharp(sourceBuffer)
+      .rotate()
+      .resize(VERIFICATION_WIDTH, VERIFICATION_HEIGHT, {
+        fit: "cover",
+        position: "centre",
+      })
+      .greyscale()
+      .png()
+      .toBuffer(),
+  ]);
+
+  const previewPath = `${propertyId}/baseline-assets/${baselineId}-preview.jpg`;
+  const verificationPath = `${propertyId}/baseline-assets/${baselineId}-verify.png`;
+
+  const [previewUrl, verificationImageUrl] = await Promise.all([
+    uploadToPropertyMediaWithRetry(supabase, previewPath, previewBuffer, "image/jpeg"),
+    uploadToPropertyMediaWithRetry(supabase, verificationPath, verificationBuffer, "image/png"),
+  ]);
+  const versionTag = Date.now();
+
+  return {
+    previewUrl: previewUrl ? `${previewUrl}?v=${versionTag}` : undefined,
+    verificationImageUrl: verificationImageUrl ? `${verificationImageUrl}?v=${versionTag}` : undefined,
+  };
+}
 
 type RoomAnalysis = {
   name?: string;
@@ -31,6 +158,8 @@ type RoomAnalysis = {
   description?: string;
   image_urls?: string[];
   imageUrls?: string[];
+  image_labels?: Record<string, string>;
+  imageLabels?: Record<string, string>;
   items?: Array<{
     name?: unknown;
     category?: unknown;
@@ -43,6 +172,8 @@ type RoomAnalysis = {
 type PropertyAnalysis = {
   rooms: RoomAnalysis[];
 };
+
+const STORAGE_UPLOAD_RETRIES = 5;
 
 // POST /api/properties/[id]/train - Analyze uploaded media with AI
 export async function POST(
@@ -293,16 +424,26 @@ export async function POST(
         : Array.isArray(roomData.imageUrls)
           ? roomData.imageUrls
           : [];
+      const roomImageLabels =
+        roomData.image_labels && typeof roomData.image_labels === "object"
+          ? roomData.image_labels
+          : roomData.imageLabels && typeof roomData.imageLabels === "object"
+            ? roomData.imageLabels
+            : {};
       let baselineCount = 0;
 
       for (const imgUrl of roomImageUrls) {
         // Only insert valid, safe string URLs from AI response
         if (typeof imgUrl !== "string" || !imgUrl.trim()) continue;
         if (!isSafeUrl(imgUrl)) continue;
+        const labelFromAi =
+          typeof roomImageLabels[imgUrl] === "string" ? roomImageLabels[imgUrl] : null;
         await db.insert(baselineImages).values({
           roomId: newRoom.id,
           imageUrl: imgUrl,
-          label: `Baseline ${baselineCount + 1}`,
+          label:
+            labelFromAi?.trim().slice(0, 100) ||
+            `${roomName} view ${baselineCount + 1}`,
           isActive: true,
         });
         baselineCount++;
@@ -320,7 +461,7 @@ export async function POST(
           await db.insert(baselineImages).values({
             roomId: newRoom.id,
             imageUrl: imageUrls[j],
-            label: `Baseline ${j - startIdx + 1}`,
+            label: `${roomName} view ${j - startIdx + 1}`,
             isActive: true,
           });
           baselineCount++;
@@ -366,39 +507,127 @@ export async function POST(
     // Process embeddings + quality scores in parallel (concurrency-limited)
     const EMBEDDING_CONCURRENCY = 3;
     let embeddingFailures = 0;
+    let usableBaselineCount = 0;
+    const storageAdmin = createStorageAdminClient();
 
     for (let i = 0; i < allPropertyBaselines.length; i += EMBEDDING_CONCURRENCY) {
       const batch = allPropertyBaselines.slice(i, i + EMBEDDING_CONCURRENCY);
-      const results = await Promise.allSettled(
+      await Promise.all(
         batch.map(async (bl) => {
-          const [embedding, qualityScore] = await Promise.all([
-            generateEmbeddingWithOptions(bl.imageUrl, {
-              allowPlaceholder: ALLOW_PLACEHOLDER_EMBEDDINGS,
-            }),
-            computeQualityScore(bl.imageUrl),
-          ]);
+          const [embeddingResult, qualityResult, derivedAssetsResult] =
+            await Promise.allSettled([
+              generateEmbeddingWithOptions(bl.imageUrl, {
+                allowPlaceholder: ALLOW_PLACEHOLDER_EMBEDDINGS,
+              }),
+              computeQualityScore(bl.imageUrl),
+              generateDerivedBaselineAssets(storageAdmin, id, bl.id, bl.imageUrl),
+            ]);
+
+          if (embeddingResult.status === "rejected") {
+            embeddingFailures++;
+            console.warn(
+              "[train] Embedding generation failed for one baseline:",
+              embeddingResult.reason,
+            );
+          }
+
+          if (derivedAssetsResult.status === "rejected") {
+            console.warn(
+              "[train] Derived baseline asset generation failed:",
+              derivedAssetsResult.reason,
+            );
+          }
+
+          const embedding =
+            embeddingResult.status === "fulfilled" ? embeddingResult.value : null;
+          const qualityScore =
+            qualityResult.status === "fulfilled" ? qualityResult.value : 150;
+          const derivedAssets =
+            derivedAssetsResult.status === "fulfilled"
+              ? derivedAssetsResult.value
+              : {};
+
+          if (embedding) {
+            usableBaselineCount++;
+          }
+
           await db
             .update(baselineImages)
             .set({
               baselineVersionId: baselineVersion.id,
               embedding,
               qualityScore,
-              embeddingModelVersion: getModelVersion(),
+              embeddingModelVersion: embedding ? getModelVersion() : null,
+              previewUrl: derivedAssets.previewUrl ?? null,
+              verificationImageUrl: derivedAssets.verificationImageUrl ?? null,
             })
             .where(eq(baselineImages.id, bl.id));
         }),
       );
+    }
 
-      for (const result of results) {
-        if (result.status === "rejected") {
-          embeddingFailures++;
-          console.warn("[train] Embedding generation failed for one baseline:", result.reason);
+    // Quality gate: deactivate baselines with very poor quality scores (> 2000),
+    // but always keep at least 2 active baselines (the best ones by score).
+    let deactivatedBaselines = 0;
+    if (allRoomIds.length > 0) {
+      const baselinesWithScores = await db
+        .select({
+          id: baselineImages.id,
+          qualityScore: baselineImages.qualityScore,
+        })
+        .from(baselineImages)
+        .where(inArray(baselineImages.roomId, allRoomIds));
+
+      // Sort ascending by quality score (lower is better)
+      baselinesWithScores.sort(
+        (a, b) => (a.qualityScore ?? 0) - (b.qualityScore ?? 0),
+      );
+
+      const MIN_ACTIVE_BASELINES = 2;
+      const toDeactivate: string[] = [];
+
+      for (let idx = 0; idx < baselinesWithScores.length; idx++) {
+        const bl = baselinesWithScores[idx];
+        const score = bl.qualityScore ?? 0;
+        const remaining = baselinesWithScores.length - toDeactivate.length;
+        if (score > 2000 && remaining > MIN_ACTIVE_BASELINES) {
+          toDeactivate.push(bl.id);
+          console.warn(
+            `[train] Deactivated baseline ${bl.id} due to poor quality score: ${score}`,
+          );
         }
+      }
+
+      if (toDeactivate.length > 0) {
+        await db
+          .update(baselineImages)
+          .set({ isActive: false })
+          .where(inArray(baselineImages.id, toDeactivate));
+        deactivatedBaselines = toDeactivate.length;
+        usableBaselineCount = Math.max(
+          0,
+          usableBaselineCount - deactivatedBaselines,
+        );
+      }
+    }
+
+    if (allPropertyBaselines.length > 0) {
+      const minUsableBaselines = Math.max(
+        createdRooms.length,
+        Math.ceil(allPropertyBaselines.length * MIN_USABLE_BASELINE_RATIO),
+      );
+
+      if (usableBaselineCount < minUsableBaselines) {
+        throw new Error(
+          `Training produced only ${usableBaselineCount}/${allPropertyBaselines.length} usable baseline views. Please retrain this property.`,
+        );
       }
     }
 
     if (embeddingFailures > 0) {
-      console.warn(`[train] ${embeddingFailures}/${allPropertyBaselines.length} baselines failed embedding generation`);
+      console.warn(
+        `[train] ${embeddingFailures}/${allPropertyBaselines.length} baselines failed embedding generation`,
+      );
     }
 
     // Set cover image and mark as trained
@@ -449,6 +678,8 @@ export async function POST(
       rooms: createdRooms,
       totalRooms: createdRooms.length,
       totalItems,
+      usableBaselines: usableBaselineCount,
+      deactivatedBaselines,
       dedupe: dedupeSummary,
       mediaSummary: {
         uploadedImages: rawImageUrls.length,
@@ -561,6 +792,9 @@ Return ONLY valid JSON (no other text) with this structure:
       "room_type": "bedroom|bathroom|kitchen|living|dining|outdoor|garage|office|hallway|other",
       "description": "Brief description of the room",
       "image_urls": ["urls of images showing this room"],
+      "image_labels": {
+        "matching image url": "Short waypoint label like Sink wall, Entry angle, Vanity counter"
+      },
       "items": [
         {
           "name": "Item name (e.g. Leather Sofa, Crystal Chandelier)",
@@ -574,7 +808,7 @@ Return ONLY valid JSON (no other text) with this structure:
   ]
 }
 
-Analyze all images and group them by room. Be thorough — identify every significant item visible. If multiple images show the same room from different angles, group them together.`,
+Analyze all images and group them by room. Be thorough — identify every significant item visible. If multiple images show the same room from different angles, group them together. When possible, provide short per-image labels for each room view so the inspection app can guide users back to the right angle later.`,
               },
               ...imageContents,
             ],

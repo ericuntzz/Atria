@@ -93,6 +93,14 @@ export class SessionManager {
    * Record entering a room.
    */
   enterRoom(roomId: string, roomName: string) {
+    if (this.state.currentRoomId === roomId) {
+      const existingVisit = this.state.visitedRooms.get(roomId);
+      if (existingVisit) {
+        existingVisit.roomName = roomName;
+      }
+      return;
+    }
+
     // Exit previous room if any
     if (this.state.currentRoomId && this.state.currentRoomId !== roomId) {
       this.exitRoom(this.state.currentRoomId);

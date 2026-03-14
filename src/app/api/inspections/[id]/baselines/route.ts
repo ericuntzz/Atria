@@ -5,10 +5,11 @@ import {
   inspections,
   rooms,
   baselineImages,
+  baselineVersions,
   items,
   propertyConditions,
 } from "@/server/schema";
-import { eq, and, inArray } from "drizzle-orm";
+import { eq, and, inArray, isNotNull } from "drizzle-orm";
 import { isPlaceholderModelVersion } from "@/lib/vision/embeddings";
 
 // GET /api/inspections/[id]/baselines - Load all rooms with baseline images,
@@ -49,6 +50,16 @@ export async function GET(
       .orderBy(rooms.sortOrder);
 
     const roomIds = propertyRooms.map((r) => r.id);
+    const activeBaselineVersions = await db
+      .select({ id: baselineVersions.id })
+      .from(baselineVersions)
+      .where(
+        and(
+          eq(baselineVersions.propertyId, inspection.propertyId),
+          eq(baselineVersions.isActive, true),
+        ),
+      );
+    const activeBaselineVersionIds = activeBaselineVersions.map((row) => row.id);
 
     // Batch-fetch baselines and items in 2 queries (fixes N+1)
     const allBaselines = roomIds.length > 0
@@ -68,6 +79,13 @@ export async function GET(
             and(
               inArray(baselineImages.roomId, roomIds),
               eq(baselineImages.isActive, true),
+              isNotNull(baselineImages.embedding),
+              activeBaselineVersionIds.length > 0
+                ? inArray(
+                    baselineImages.baselineVersionId,
+                    activeBaselineVersionIds,
+                  )
+                : isNotNull(baselineImages.baselineVersionId),
             ),
           )
       : [];

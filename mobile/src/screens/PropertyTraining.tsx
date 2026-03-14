@@ -30,7 +30,7 @@ import {
   Linking,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { CameraView, useCameraPermissions } from "expo-camera";
+import { CameraView, useCameraPermissions, useMicrophonePermissions } from "expo-camera";
 import { requireOptionalNativeModule } from "expo-modules-core";
 import { Gesture, GestureDetector } from "react-native-gesture-handler";
 import { runOnJS } from "react-native-reanimated";
@@ -47,6 +47,7 @@ import {
   ApiError,
 } from "../lib/api";
 import { colors } from "../lib/tokens";
+import * as FileSystem from "expo-file-system";
 
 type Nav = NativeStackNavigationProp<RootStackParamList, "PropertyTraining">;
 type TrainingRoute = RouteProp<RootStackParamList, "PropertyTraining">;
@@ -156,6 +157,7 @@ export default function PropertyTrainingScreen() {
   const isLandscape = width > height;
 
   const [permission, requestPermission] = useCameraPermissions();
+  const [microphonePermission, requestMicrophonePermission] = useMicrophonePermissions();
   const [phase, setPhase] = useState<TrainingPhase>("intro");
   const [captures, setCaptures] = useState<CapturedMedia[]>([]);
   const [captureMode, setCaptureMode] = useState<CaptureMode>("photo");
@@ -172,6 +174,7 @@ export default function PropertyTrainingScreen() {
   const baseZoomRef = useRef(0);
   const isCapturingRef = useRef(false);
   const isRecordingRef = useRef(false);
+  const capturesRef = useRef<CapturedMedia[]>([]);
   const recordingPulse = useRef(new Animated.Value(0)).current;
   // Track successful uploads so retries don't duplicate — maps capture.id → upload record ids
   const uploadedIdsRef = useRef<Map<string, string[]>>(new Map());
@@ -191,6 +194,40 @@ export default function PropertyTrainingScreen() {
   // ── Pinch-to-Zoom Gesture ──
   const zoomRef = useRef(zoom);
   zoomRef.current = zoom;
+
+  useEffect(() => {
+    capturesRef.current = captures;
+  }, [captures]);
+
+  const deleteLocalMedia = useCallback((uri?: string | null) => {
+    if (!uri || !uri.startsWith("file://")) return;
+
+    try {
+      const file = new FileSystem.File(uri);
+      if (file.exists) {
+        file.delete();
+      }
+    } catch (err) {
+      console.warn("[PropertyTraining] Failed to delete local media", { uri, err });
+    }
+  }, []);
+
+  const releaseCapturedMedia = useCallback(
+    (media: CapturedMedia[]) => {
+      media.forEach((capture) => deleteLocalMedia(capture.uri));
+      capturesRef.current = [];
+      uploadedIdsRef.current.clear();
+    },
+    [deleteLocalMedia],
+  );
+
+  const clearCapturedMedia = useCallback(
+    (media: CapturedMedia[]) => {
+      releaseCapturedMedia(media);
+      setCaptures([]);
+    },
+    [releaseCapturedMedia],
+  );
 
   const pinchGesture = Gesture.Pinch()
     .onStart(() => {
@@ -391,6 +428,7 @@ export default function PropertyTrainingScreen() {
       }
 
       if (captures.length === 0) {
+        uploadedIdsRef.current.clear();
         if (isAddMore && previousResultRef.current) {
           setTrainingResult(previousResultRef.current);
           setPhase("results");
@@ -409,12 +447,12 @@ export default function PropertyTrainingScreen() {
             text: "Discard",
             style: "destructive",
             onPress: () => {
+              clearCapturedMedia(capturesRef.current);
               if (isAddMore && previousResultRef.current) {
-                setCaptures([]);
                 setTrainingResult(previousResultRef.current);
                 setPhase("results");
               } else {
-                navigation.goBack();
+                setPhase("intro");
               }
             },
           },
@@ -425,7 +463,13 @@ export default function PropertyTrainingScreen() {
 
     const sub = BackHandler.addEventListener("hardwareBackPress", onBackPress);
     return () => sub.remove();
-  }, [phase, captures.length, isAddMore, navigation]);
+  }, [clearCapturedMedia, phase, captures.length, isAddMore]);
+
+  useEffect(() => {
+    return () => {
+      releaseCapturedMedia(capturesRef.current);
+    };
+  }, [releaseCapturedMedia]);
 
   const handleStartCapture = useCallback(async () => {
     if (!permission?.granted) {
@@ -445,9 +489,13 @@ export default function PropertyTrainingScreen() {
         return;
       }
     }
+    clearCapturedMedia(capturesRef.current);
     setError(null);
+    setTrainingResult(null);
+    setIsAddMore(false);
+    previousResultRef.current = null;
     setPhase("capturing");
-  }, [permission, requestPermission]);
+  }, [clearCapturedMedia, permission, requestPermission]);
 
   const handleCapture = useCallback(async () => {
     if (!cameraRef.current || isCapturingRef.current) return;
@@ -481,6 +529,24 @@ export default function PropertyTrainingScreen() {
   // ── Video Recording ──
   const handleStartRecording = useCallback(async () => {
     if (!cameraRef.current || isRecordingRef.current) return;
+
+    if (!microphonePermission?.granted) {
+      const result = await requestMicrophonePermission();
+      if (!result.granted) {
+        Alert.alert(
+          "Microphone Required",
+          "Microphone access is needed to record training videos.",
+          [
+            { text: "Cancel", style: "cancel" },
+            {
+              text: "Open Settings",
+              onPress: () => Linking.openSettings(),
+            },
+          ],
+        );
+        return;
+      }
+    }
 
     if (!videoThumbnailsRef.current && !videoSupportAlertShownRef.current) {
       videoSupportAlertShownRef.current = true;
@@ -516,7 +582,7 @@ export default function PropertyTrainingScreen() {
       isRecordingRef.current = false;
       setIsRecording(false);
     }
-  }, []);
+  }, [microphonePermission, requestMicrophonePermission]);
 
   const handleStopRecording = useCallback(() => {
     if (!cameraRef.current || !isRecordingRef.current) return;
@@ -527,8 +593,16 @@ export default function PropertyTrainingScreen() {
   const handleRemoveCapture = useCallback((id: string) => {
     // Clear cached upload ID so it doesn't get sent to training if removed
     uploadedIdsRef.current.delete(id);
-    setCaptures((prev) => prev.filter((c) => c.id !== id));
-  }, []);
+    setCaptures((prev) => {
+      const capture = prev.find((item) => item.id === id);
+      if (capture) {
+        deleteLocalMedia(capture.uri);
+      }
+      const next = prev.filter((item) => item.id !== id);
+      capturesRef.current = next;
+      return next;
+    });
+  }, [deleteLocalMedia]);
 
   const isRunActive = useCallback((runId: number) => {
     return runIdRef.current === runId && !cancelRequestedRef.current;
@@ -622,21 +696,25 @@ export default function PropertyTrainingScreen() {
           uploadedIdsRef.current.set(capture.id, [...uploadedForCapture]);
 
           const keyframeUris = await extractVideoKeyframeUris(capture.uri);
-          for (let frameIndex = 0; frameIndex < keyframeUris.length; frameIndex++) {
-            if (!isRunActive(currentRunId)) {
-              throw new Error("Processing canceled");
-            }
+          try {
+            for (let frameIndex = 0; frameIndex < keyframeUris.length; frameIndex++) {
+              if (!isRunActive(currentRunId)) {
+                throw new Error("Processing canceled");
+              }
 
-            const frameResult = await uploadImageFile(
-              keyframeUris[frameIndex],
-              propertyId,
-              `training-video-${i + 1}-frame-${frameIndex + 1}.jpg`,
-            );
-            uploadedForCapture.push(frameResult.id);
-            mediaUploadIds.push(frameResult.id);
-            uploadedImageCount += 1;
-            progressCurrent += 1;
-            setUploadProgress({ current: progressCurrent, total });
+              const frameResult = await uploadImageFile(
+                keyframeUris[frameIndex],
+                propertyId,
+                `training-video-${i + 1}-frame-${frameIndex + 1}.jpg`,
+              );
+              uploadedForCapture.push(frameResult.id);
+              mediaUploadIds.push(frameResult.id);
+              uploadedImageCount += 1;
+              progressCurrent += 1;
+              setUploadProgress({ current: progressCurrent, total });
+            }
+          } finally {
+            keyframeUris.forEach((uri) => deleteLocalMedia(uri));
           }
         } else {
           const imageResult = await uploadBase64Image(
@@ -673,6 +751,7 @@ export default function PropertyTrainingScreen() {
         return;
       }
       setTrainingResult(result);
+      captures.forEach((capture) => deleteLocalMedia(capture.uri));
       setPhase("results");
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
     } catch (err) {
@@ -693,6 +772,8 @@ export default function PropertyTrainingScreen() {
           setError("Training is already in progress for this property. Please wait a moment and try again.");
         } else if (err.status === 413) {
           setError("Images are too large. Try capturing fewer or lower-resolution images.");
+        } else if (err.status === 503) {
+          setError("AI processing is temporarily unavailable. Please try again in a few minutes.");
         } else if (err.status >= 500) {
           setError(`Server error during ${stage === "upload" ? "upload" : "training"}. Please try again in a few moments.`);
         } else {
@@ -707,7 +788,7 @@ export default function PropertyTrainingScreen() {
       }
       setPhase("capturing");
     }
-  }, [captures, extractVideoKeyframeUris, isRunActive, propertyId]);
+  }, [captures, deleteLocalMedia, extractVideoKeyframeUris, isRunActive, propertyId]);
 
   const handleDoneCapturing = useCallback(() => {
     const hasVideosWithKeyframes =
@@ -1054,8 +1135,7 @@ export default function PropertyTrainingScreen() {
             style={styles.addMoreButton}
             onPress={() => {
               previousResultRef.current = trainingResult;
-              setCaptures([]);
-              uploadedIdsRef.current.clear();
+              clearCapturedMedia(capturesRef.current);
               setTrainingResult(null);
               setIsAddMore(true);
               setPhase("capturing");
@@ -1069,7 +1149,10 @@ export default function PropertyTrainingScreen() {
           </TouchableOpacity>
           <TouchableOpacity
             style={styles.doneButton}
-            onPress={() => navigation.popToTop()}
+            onPress={() => {
+              clearCapturedMedia(capturesRef.current);
+              navigation.popToTop();
+            }}
             activeOpacity={0.8}
           >
             <Text style={styles.doneButtonText}>Done</Text>
@@ -1147,8 +1230,8 @@ export default function PropertyTrainingScreen() {
                     text: "Discard",
                     style: "destructive",
                     onPress: () => {
+                      clearCapturedMedia(capturesRef.current);
                       if (isAddMore && previousResultRef.current) {
-                        setCaptures([]);
                         setTrainingResult(previousResultRef.current);
                         setPhase("results");
                       } else {
@@ -1159,9 +1242,11 @@ export default function PropertyTrainingScreen() {
                 ],
               );
             } else if (isAddMore && previousResultRef.current) {
+              uploadedIdsRef.current.clear();
               setTrainingResult(previousResultRef.current);
               setPhase("results");
             } else {
+              uploadedIdsRef.current.clear();
               setPhase("intro");
             }
           }}

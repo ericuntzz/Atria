@@ -44,6 +44,7 @@ export default function PropertiesScreen() {
   const [error, setError] = useState<string | null>(null);
   const [userInitial, setUserInitial] = useState("U");
   const retryCountRef = useRef(0);
+  const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const MAX_AUTO_RETRIES = 2;
 
   // Add Property modal
@@ -82,7 +83,7 @@ export default function PropertiesScreen() {
         setError(`Failed to load properties. ${retryHint}`);
       } else {
         retryCountRef.current += 1;
-        setTimeout(() => loadProperties(true), 1500);
+        retryTimerRef.current = setTimeout(() => loadProperties(true), 1500);
         return;
       }
     } finally {
@@ -94,6 +95,12 @@ export default function PropertiesScreen() {
   useFocusEffect(
     useCallback(() => {
       loadProperties();
+      return () => {
+        if (retryTimerRef.current) {
+          clearTimeout(retryTimerRef.current);
+          retryTimerRef.current = null;
+        }
+      };
     }, [loadProperties]),
   );
 
@@ -388,6 +395,7 @@ export default function PropertiesScreen() {
         data={properties}
         keyExtractor={(item) => item.id}
         renderItem={renderProperty}
+        extraData={selectionMode ? selectedIds : undefined}
         contentContainerStyle={[
           styles.list,
           selectionMode && selectedIds.size > 0 && { paddingBottom: 110 },

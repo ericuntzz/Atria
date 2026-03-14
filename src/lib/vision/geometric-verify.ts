@@ -54,16 +54,24 @@ interface VerifierConfig {
   minOverlap: number;
   maxAreaRatio: number;
   minEdgeRatio: number;
+  maxFeatures: number;
+  fastThreshold: number;
+  matchRatioThreshold: number;
+  ransacThreshold: number;
 }
 
 function loadConfig(): VerifierConfig {
   return {
     minInliers: envNumber("VERIFY_MIN_INLIERS", 12),
-    minInlierRatio: envNumber("VERIFY_MIN_INLIER_RATIO", 0.25),
-    minQuadrantCoverage: envNumber("VERIFY_MIN_QUADRANT_COVERAGE", 3),
+    minInlierRatio: envNumber("VERIFY_MIN_INLIER_RATIO", 0.20),
+    minQuadrantCoverage: envNumber("VERIFY_MIN_QUADRANT_COVERAGE", 2),
     minOverlap: envNumber("VERIFY_MIN_OVERLAP", 0.30),
     maxAreaRatio: envNumber("VERIFY_MAX_AREA_RATIO", 5.0),
     minEdgeRatio: envNumber("VERIFY_MIN_EDGE_RATIO", 0.10),
+    maxFeatures: envNumber("VERIFY_MAX_FEATURES", 700),
+    fastThreshold: envNumber("VERIFY_FAST_THRESHOLD", 12),
+    matchRatioThreshold: envNumber("VERIFY_MATCH_RATIO", 0.9),
+    ransacThreshold: envNumber("VERIFY_RANSAC_THRESHOLD", 4.0),
   };
 }
 
@@ -76,8 +84,8 @@ function envNumber(key: string, defaultVal: number): number {
 
 // ─── Image Preprocessing ────────────────────────────────────────
 
-const VERIFY_WIDTH = 640;
-const VERIFY_HEIGHT = 480;
+const VERIFY_WIDTH = 480;
+const VERIFY_HEIGHT = 360;
 
 /**
  * Convert an image buffer (JPEG/PNG/etc) to raw grayscale pixels at verification resolution.
@@ -88,7 +96,7 @@ export async function imageToGrayscale(imageBuffer: Buffer): Promise<{
   height: number;
 }> {
   const { data, info } = await sharp(imageBuffer)
-    .resize(VERIFY_WIDTH, VERIFY_HEIGHT, { fit: "inside" })
+    .resize(VERIFY_WIDTH, VERIFY_HEIGHT, { fit: "cover", position: "centre" })
     .greyscale()
     .raw()
     .toBuffer({ resolveWithObject: true });
@@ -126,7 +134,6 @@ export class JsfeatVerifier implements GeometricVerifier {
     width: number,
     height: number,
   ): Promise<GeometricVerifyResult> {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
     const jsfeat = require("jsfeat");
 
     const rejectionReasons: string[] = [];
@@ -140,8 +147,22 @@ export class JsfeatVerifier implements GeometricVerifier {
     imgCurr.data.set(currentGray);
 
     // Detect ORB keypoints + descriptors on both images
-    const cornersBase = detectORB(jsfeat, imgBase, width, height);
-    const cornersCurr = detectORB(jsfeat, imgCurr, width, height);
+    const cornersBase = detectORB(
+      jsfeat,
+      imgBase,
+      width,
+      height,
+      this.config.maxFeatures,
+      this.config.fastThreshold,
+    );
+    const cornersCurr = detectORB(
+      jsfeat,
+      imgCurr,
+      width,
+      height,
+      this.config.maxFeatures,
+      this.config.fastThreshold,
+    );
 
     if (cornersBase.keypoints.length < 8 || cornersCurr.keypoints.length < 8) {
       return {
@@ -164,6 +185,7 @@ export class JsfeatVerifier implements GeometricVerifier {
       cornersCurr.descriptors,
       cornersBase.keypoints.length,
       cornersCurr.keypoints.length,
+      this.config.matchRatioThreshold,
     );
 
     const matchCount = matches.length;
@@ -190,7 +212,12 @@ export class JsfeatVerifier implements GeometricVerifier {
     }
 
     // Estimate homography via RANSAC
-    const ransacResult = estimateHomographyRANSAC(srcPoints, dstPoints);
+    const ransacResult = estimateHomographyRANSAC(
+      srcPoints,
+      dstPoints,
+      1000,
+      this.config.ransacThreshold,
+    );
     if (!ransacResult) {
       return {
         verified: false,
@@ -306,20 +333,22 @@ function detectORB(
   width: number,
   height: number,
   maxFeatures = 500,
+  fastThreshold = 20,
 ): ORBResult {
   // Apply Gaussian blur to reduce noise
   const blurred = new jsfeat.matrix_t(width, height, jsfeat.U8_t | jsfeat.C1_t);
   jsfeat.imgproc.gaussian_blur(grayMatrix, blurred, 3);
 
   // Detect FAST corners
+  const cornerCapacity = width * height;
   const corners: any[] = [];
-  for (let i = 0; i < maxFeatures * 2; i++) {
+  for (let i = 0; i < cornerCapacity; i++) {
     corners.push(new jsfeat.keypoint_t(0, 0, 0, 0));
   }
 
-  jsfeat.fast_corners.set_threshold(20);
+  jsfeat.fast_corners.set_threshold(fastThreshold);
   let count = jsfeat.fast_corners.detect(blurred, corners, 3);
-  count = Math.min(count, maxFeatures * 2);
+  count = Math.min(count, cornerCapacity);
 
   // Non-maximum suppression
   if (count > 0) {

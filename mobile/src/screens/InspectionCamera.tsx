@@ -12,6 +12,10 @@ import {
   KeyboardAvoidingView,
   Platform,
   Image,
+  Linking,
+  Animated,
+  AppState,
+  type AppStateStatus,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { CameraView, useCameraPermissions } from "expo-camera";
@@ -38,7 +42,6 @@ import { RoomDetector, type BaselineCandidate } from "../lib/vision/room-detecto
 import { loadOnnxModel, type OnnxModelLoader } from "../lib/vision/onnx-model";
 import {
   getInspectionBaselines,
-  getPropertyConditions,
   submitBulkResults,
 } from "../lib/api";
 import { supabase } from "../lib/supabase";
@@ -68,6 +71,13 @@ interface RoomBaseline {
 
 const CHANGE_FRAME_WIDTH = 320;
 const CHANGE_FRAME_HEIGHT = 240;
+const LOCALIZATION_NOT_READY_THRESHOLD = 0.40;
+const LOCALIZATION_LOCKED_THRESHOLD = 0.50;
+const LOCALIZATION_AUTO_CAPTURE_THRESHOLD = 0.55;
+const LOCALIZATION_AMBIGUITY_GAP = 0.04;
+const LOCALIZATION_OVERLAY_GRACE_MS = 1400;
+const LOCALIZATION_ROOM_SYNC_THRESHOLD = 0.62;
+const AUTO_CAPTURE_INTERVAL_MS = 1500;
 
 type LocalizationState =
   | "not_localized"        // No candidate above 0.70
@@ -78,8 +88,8 @@ type LocalizationState =
   | "verification_failed"; // Server could not geometrically verify this view
 
 function getSimilarityColor(similarity: number): string {
-  if (similarity >= 0.85) return "#22c55e"; // green
-  if (similarity >= 0.70) return "#eab308"; // yellow
+  if (similarity >= 0.55) return "#22c55e"; // green
+  if (similarity >= 0.45) return "#eab308"; // yellow
   return "#ef4444"; // red
 }
 
@@ -93,6 +103,28 @@ function getLocalizationGuidance(state: LocalizationState): string | null {
     case "verification_failed": return "Try a slightly different angle";
   }
 }
+
+function cosineSimilarity(
+  a: ArrayLike<number>,
+  b: ArrayLike<number>,
+): number {
+  if (a.length !== b.length || a.length === 0) return Number.NEGATIVE_INFINITY;
+  let dot = 0;
+  let normA = 0;
+  let normB = 0;
+  for (let i = 0; i < a.length; i++) {
+    dot += a[i] * b[i];
+    normA += a[i] * a[i];
+    normB += b[i] * b[i];
+  }
+  const denom = Math.sqrt(normA) * Math.sqrt(normB);
+  return denom === 0 ? Number.NEGATIVE_INFINITY : dot / denom;
+}
+
+type CapturedFrameData = {
+  dataUri: string;
+  uri: string;
+};
 
 export default function InspectionCameraScreen() {
   const navigation = useNavigation<Nav>();
@@ -114,6 +146,7 @@ export default function InspectionCameraScreen() {
   const [roomAngles, setRoomAngles] = useState({ scanned: 0, total: 0 });
   const [isProcessing, setIsProcessing] = useState(false);
   const [isAutoDetect, setIsAutoDetect] = useState(false);
+  const [autoDetectUnavailableReason, setAutoDetectUnavailableReason] = useState<string | null>(null);
   const [autoCaptureEnabled, setAutoCaptureEnabled] = useState(true);
   const [showNoteModal, setShowNoteModal] = useState(false);
   const [showNotesLogModal, setShowNotesLogModal] = useState(false);
@@ -129,6 +162,9 @@ export default function InspectionCameraScreen() {
     isLocked: boolean;
     topCandidates: BaselineCandidate[];
   } | null>(null);
+  const [localizationStuckSince, setLocalizationStuckSince] = useState<number | null>(null);
+  const [userSelectedBaselineId, setUserSelectedBaselineId] = useState<string | null>(null);
+  const [showTargetAssist, setShowTargetAssist] = useState(false);
   const [zoom, setZoom] = useState(0);
   const [roomWaypoints, setRoomWaypoints] = useState<
     Array<{ id: string; label: string | null; scanned: boolean }>
@@ -162,16 +198,98 @@ export default function InspectionCameraScreen() {
   const modelLoaderRef = useRef<OnnxModelLoader | null>(null);
   const roomDetectionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const captureHintTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const targetAssistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const autoCaptureEnabledRef = useRef(autoCaptureEnabled);
   const autoAllRoomsCompleteHintRef = useRef(false);
+  const borderPulseAnim = useRef(new Animated.Value(1)).current;
+
+  // Pulse the border opacity when localized (green)
+  useEffect(() => {
+    if (lockedBaselineInfo?.isLocked && lockedBaselineInfo.similarity >= 0.55) {
+      const pulse = Animated.loop(
+        Animated.sequence([
+          Animated.timing(borderPulseAnim, {
+            toValue: 0.5,
+            duration: 900,
+            useNativeDriver: true,
+          }),
+          Animated.timing(borderPulseAnim, {
+            toValue: 1,
+            duration: 900,
+            useNativeDriver: true,
+          }),
+        ]),
+      );
+      pulse.start();
+      return () => pulse.stop();
+    } else {
+      borderPulseAnim.setValue(1);
+    }
+  }, [lockedBaselineInfo?.isLocked, lockedBaselineInfo?.similarity]);
+
+  const isSubmittingRef = useRef(false);
   const baselinesRef = useRef<RoomBaseline[]>([]);
   const knownConditionsByRoomRef = useRef<Map<string, string[]>>(new Map());
   const globalKnownConditionsRef = useRef<string[]>([]);
   const announcerRef = useRef(new InspectionAnnouncer());
+  const pausedRef = useRef(paused);
+  const isMountedRef = useRef(true);
+  const isProcessingRef = useRef(isProcessing);
+  const overlayGraceUntilRef = useRef(0);
+  const autoCapturTickRef = useRef<((s: SessionManager, c: ComparisonManager) => Promise<void>) | undefined>(undefined);
+  const autoCaptureStartTimeRef = useRef<number>(Date.now());
+  const hasFirstAutoCaptureRef = useRef(false);
 
   useEffect(() => {
     autoCaptureEnabledRef.current = autoCaptureEnabled;
   }, [autoCaptureEnabled]);
+
+  useEffect(() => {
+    pausedRef.current = paused;
+  }, [paused]);
+
+  useEffect(() => {
+    isProcessingRef.current = isProcessing;
+  }, [isProcessing]);
+
+  useEffect(() => {
+    if (targetAssistTimerRef.current) {
+      clearTimeout(targetAssistTimerRef.current);
+      targetAssistTimerRef.current = null;
+    }
+
+    const shouldOfferManualTargeting =
+      !paused &&
+      !!lockedBaselineInfo &&
+      (localizationState === "ambiguous" ||
+        localizationState === "verification_failed");
+
+    if (!shouldOfferManualTargeting) {
+      setShowTargetAssist(false);
+      return;
+    }
+
+    targetAssistTimerRef.current = setTimeout(() => {
+      setShowTargetAssist(true);
+    }, 5_000);
+
+    return () => {
+      if (targetAssistTimerRef.current) {
+        clearTimeout(targetAssistTimerRef.current);
+        targetAssistTimerRef.current = null;
+      }
+    };
+  }, [lockedBaselineInfo, localizationState, paused]);
+
+  useEffect(() => {
+    if (
+      localizationState !== "ambiguous" &&
+      localizationState !== "verification_failed"
+    ) {
+      setUserSelectedBaselineId(null);
+      setShowTargetAssist(false);
+    }
+  }, [localizationState]);
 
   const showCaptureHint = useCallback((message: string) => {
     setCaptureHint(message);
@@ -181,8 +299,101 @@ export default function InspectionCameraScreen() {
     captureHintTimerRef.current = setTimeout(() => {
       setCaptureHint(null);
       captureHintTimerRef.current = null;
-    }, 1800);
+    }, 4500);
   }, []);
+
+  const getBaselineById = useCallback((baselineId: string) => {
+    return baselinesRef.current
+      .flatMap((room) =>
+        room.baselines.map((baseline) => ({
+          ...baseline,
+          roomId: room.roomId,
+          roomName: room.roomName,
+        })),
+      )
+      .find((baseline) => baseline.id === baselineId) || null;
+  }, []);
+
+  const captureHighResFrame = useCallback(async (): Promise<CapturedFrameData | null> => {
+    if (!cameraRef.current) return null;
+    try {
+      const photo = await cameraRef.current.takePictureAsync({
+        quality: 0.7,
+        base64: true,
+      });
+      if (!photo?.base64 || !photo.uri) {
+        return null;
+      }
+      return {
+        dataUri: `data:image/jpeg;base64,${photo.base64}`,
+        uri: photo.uri,
+      };
+    } catch {
+      return null;
+    }
+  }, []);
+
+  const rankCandidatesForCapturedFrame = useCallback(
+    async (
+      imageUri: string,
+      currentRoomId: string,
+      fallbackTopCandidates: BaselineCandidate[],
+    ): Promise<BaselineCandidate[]> => {
+      const loader = modelLoaderRef.current;
+      const allBaselines = baselinesRef.current.flatMap((room) =>
+        room.baselines.map((baseline) => ({
+          ...baseline,
+          roomId: room.roomId,
+        })),
+      );
+
+      if (!loader?.isLoaded) {
+        return fallbackTopCandidates;
+      }
+
+      const embedding = await loader.generateEmbedding(imageUri);
+      if (!embedding) {
+        return fallbackTopCandidates;
+      }
+
+      const currentRoomBaselines = allBaselines.filter(
+        (baseline) => baseline.roomId === currentRoomId,
+      );
+      const searchSpace =
+        currentRoomBaselines.length > 0 && (lockedBaselineInfo?.similarity ?? 0) >= 0.68
+          ? currentRoomBaselines
+          : allBaselines;
+
+      const ranked = searchSpace
+        .filter(
+          (baseline) =>
+            Array.isArray(baseline.embedding) &&
+            baseline.embedding.length === embedding.length,
+        )
+        .map((baseline) => ({
+          baselineId: baseline.id,
+          similarity: cosineSimilarity(embedding, baseline.embedding as number[]),
+        }))
+        .sort((a, b) => b.similarity - a.similarity);
+
+      if (ranked.length === 0) {
+        return fallbackTopCandidates;
+      }
+
+      if (userSelectedBaselineId) {
+        const selectedIdx = ranked.findIndex(
+          (candidate) => candidate.baselineId === userSelectedBaselineId,
+        );
+        if (selectedIdx > 0) {
+          const [selected] = ranked.splice(selectedIdx, 1);
+          ranked.unshift(selected);
+        }
+      }
+
+      return ranked.slice(0, 3);
+    },
+    [lockedBaselineInfo?.similarity, userSelectedBaselineId],
+  );
 
   // Initialize engines on mount
   useEffect(() => {
@@ -210,14 +421,21 @@ export default function InspectionCameraScreen() {
 
     // Register finding callback
     comparison.onResult((result, context) => {
+      if (!isMountedRef.current) return; // Skip state updates after unmount
       const { roomId, roomName, baselineImageId, triggerSource } = context;
-      const skippedForAlignment =
-        result.diagnostics?.skippedByPreflight &&
-        result.diagnostics?.preflight?.reason === "alignment_low_confidence";
+      const resolvedBaseline = result.verifiedBaselineId
+        ? getBaselineById(result.verifiedBaselineId)
+        : baselineImageId
+          ? getBaselineById(baselineImageId)
+          : null;
+      const resolvedRoomId = resolvedBaseline?.roomId || roomId;
+      const resolvedRoomName = resolvedBaseline?.roomName || roomName;
+      const resolvedBaselineId = result.verifiedBaselineId || baselineImageId;
 
-      session.recordEvent("comparison_completed", roomId, {
-        baselineImageId,
+      session.recordEvent("comparison_completed", resolvedRoomId, {
+        baselineImageId: resolvedBaselineId,
         triggerSource,
+        status: result.status,
         summary: result.summary,
         findingsCount: result.findings?.length || 0,
         readinessScore: result.readiness_score,
@@ -226,31 +444,48 @@ export default function InspectionCameraScreen() {
         alignmentScore: result.diagnostics?.preflight?.alignment?.score,
       });
 
-      if (skippedForAlignment) {
-        session.recordEvent("capture_rejected_alignment", roomId, {
-          baselineImageId,
+      if (result.status === "localization_failed") {
+        session.recordEvent("capture_rejected_alignment", resolvedRoomId, {
+          baselineImageId: resolvedBaselineId,
           triggerSource,
           summary: result.summary,
         });
         setLocalizationState("verification_failed");
-        showCaptureHint("Try a slightly different angle");
+        setShowTargetAssist(true);
+        showCaptureHint(result.userGuidance || "Try a slightly different angle");
         void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
         return;
       }
 
+      if (result.status === "comparison_unavailable") {
+        setLocalizationState("localized");
+        setShowTargetAssist(false);
+        showCaptureHint(result.userGuidance || "That angle could not be analyzed. Try again.");
+        void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
+        return;
+      }
+
+      setLocalizationState("localized");
+      setShowTargetAssist(false);
+      setUserSelectedBaselineId(null);
+
+      if (resolvedBaseline && session.getState().currentRoomId !== resolvedBaseline.roomId) {
+        activateRoom(session, resolvedBaseline.roomId, resolvedBaseline.roomName);
+      }
+
       // Only mark angle as scanned after server-verified comparison
-      if (baselineImageId) {
-        session.recordAngleScan(roomId, baselineImageId);
-        roomDetectorRef.current?.markAngleScanned(baselineImageId, roomId);
-        updateCoverageUI(session, roomId);
+      if (resolvedBaselineId) {
+        session.recordAngleScan(resolvedRoomId, resolvedBaselineId);
+        roomDetectorRef.current?.markAngleScanned(resolvedBaselineId, resolvedRoomId);
+        updateCoverageUI(session, resolvedRoomId);
         if ((result.findings?.length || 0) === 0) {
-          autoAdvanceIfRoomComplete(session, roomId);
+          autoAdvanceIfRoomComplete(session, resolvedRoomId);
         }
       }
 
       if (result.findings?.length > 0) {
         for (const f of result.findings) {
-          const findingId = session.addFinding(roomId, f);
+          const findingId = session.addFinding(resolvedRoomId, f);
           setFindings((prev) => [
             ...prev,
             {
@@ -268,19 +503,24 @@ export default function InspectionCameraScreen() {
           const firstFinding = result.findings[0];
           if (firstFinding) {
             void announcerRef.current.announceFinding(
-              roomName || "current room",
+              resolvedRoomName || "current room",
               firstFinding.description,
             );
           }
         }
-      } else if (triggerSource === "manual" && result.readiness_score != null) {
-        showCaptureHint("Angle captured");
-      } else if (triggerSource === "manual" && result.readiness_score == null) {
-        showCaptureHint(result.summary || "That angle could not be analyzed.");
+      } else if (
+        result.status === "localized_no_change" ||
+        result.status === "localized_changed"
+      ) {
+        showCaptureHint(
+          triggerSource === "auto"
+            ? "Saved view captured automatically"
+            : "Saved view captured",
+        );
       }
 
       if (result.readiness_score != null) {
-        session.updateRoomScore(roomId, result.readiness_score);
+        session.updateRoomScore(resolvedRoomId, result.readiness_score);
       }
     });
 
@@ -291,9 +531,8 @@ export default function InspectionCameraScreen() {
       }
     });
 
-    // Load baselines
+    // Load baselines (also populates known conditions from the same response)
     loadBaselines(session);
-    loadKnownConditions();
 
     if (activeImageSource !== "camera") {
       showCaptureHint(
@@ -318,13 +557,23 @@ export default function InspectionCameraScreen() {
       .then((loader) => {
         modelLoaderRef.current = loader;
         if (loader.isLoaded) {
+          setAutoDetectUnavailableReason(null);
           roomDetector.setModelLoader(loader);
           setIsAutoDetect(true);
           startRoomDetectionLoop(roomDetector, session);
+        } else if (loader.unavailableReason) {
+          setAutoDetectUnavailableReason(loader.unavailableReason);
+          setCaptureHint(loader.unavailableReason);
+          Alert.alert("Use The Atria Dev Build", loader.unavailableReason);
         }
       })
       .catch((err) => {
         console.warn("ONNX model load failed, room auto-detect disabled:", err);
+        const fallbackMessage =
+          "AI inspection requires the Atria dev build. Open the latest dev build instead of Expo Go.";
+        setAutoDetectUnavailableReason(fallbackMessage);
+        setCaptureHint(fallbackMessage);
+        Alert.alert("Use The Atria Dev Build", fallbackMessage);
       });
 
     // Start auto-capture loop (every 3s, checks if conditions are met)
@@ -337,8 +586,8 @@ export default function InspectionCameraScreen() {
       const state = session.getState();
       if (!state.currentRoomId) return;
 
-      autoCaptureTick(session, comparison);
-    }, 3000);
+      void autoCapturTickRef.current?.(session, comparison);
+    }, AUTO_CAPTURE_INTERVAL_MS);
 
     return () => {
       motionFilter.stop();
@@ -353,8 +602,55 @@ export default function InspectionCameraScreen() {
         clearTimeout(captureHintTimerRef.current);
       }
       announcerRef.current.setEnabled(false);
+      isMountedRef.current = false;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Pause sensors, camera, and timers when app goes to background
+  useEffect(() => {
+    const appStateRef = { wasBackground: false };
+
+    const handleAppStateChange = (nextAppState: AppStateStatus) => {
+      if (nextAppState === "background" || nextAppState === "inactive") {
+        appStateRef.wasBackground = true;
+        motionFilterRef.current?.stop();
+        if (autoCaptureTimerRef.current) {
+          clearInterval(autoCaptureTimerRef.current);
+          autoCaptureTimerRef.current = null;
+        }
+        if (roomDetectionTimerRef.current) {
+          clearTimeout(roomDetectionTimerRef.current);
+          roomDetectionTimerRef.current = null;
+        }
+      } else if (nextAppState === "active" && appStateRef.wasBackground) {
+        appStateRef.wasBackground = false;
+        if (!pausedRef.current) {
+          motionFilterRef.current?.start();
+
+          // Restart auto-capture interval if it was running before backgrounding
+          if (autoCaptureEnabledRef.current && !autoCaptureTimerRef.current) {
+            const s = sessionRef.current;
+            const c = comparisonRef.current;
+            if (s && c) {
+              autoCaptureTimerRef.current = setInterval(() => {
+                void autoCapturTickRef.current?.(s, c);
+              }, AUTO_CAPTURE_INTERVAL_MS);
+            }
+          }
+
+          // Restart room detection loop if detector exists and loop is dead
+          const detector = roomDetectorRef.current;
+          const session = sessionRef.current;
+          if (detector && session && !roomDetectionTimerRef.current) {
+            startRoomDetectionLoop(detector, session);
+          }
+        }
+      }
+    };
+
+    const subscription = AppState.addEventListener("change", handleAppStateChange);
+    return () => subscription.remove();
   }, []);
 
   const updateCoverageUI = useCallback(
@@ -396,6 +692,29 @@ export default function InspectionCameraScreen() {
       updateCoverageUI(session, roomId);
     },
     [updateCoverageUI],
+  );
+
+  const syncRoomFromLockedBaseline = useCallback(
+    (
+      session: SessionManager,
+      locked: {
+        baseline: { roomId: string; roomName: string };
+        similarity: number;
+        isLocked: boolean;
+      } | null,
+    ) => {
+      if (!locked?.isLocked || locked.similarity < LOCALIZATION_ROOM_SYNC_THRESHOLD) {
+        return;
+      }
+
+      const activeRoomId = session.getState().currentRoomId;
+      if (activeRoomId === locked.baseline.roomId) {
+        return;
+      }
+
+      activateRoom(session, locked.baseline.roomId, locked.baseline.roomName);
+    },
+    [activateRoom],
   );
 
   const getNextIncompleteRoom = useCallback((session: SessionManager) => {
@@ -499,47 +818,50 @@ export default function InspectionCameraScreen() {
         }
         session.setRoomAngles(roomAnglesMap);
 
+        // Parse known conditions from the same baselines response (avoids extra API call)
+        interface ApiCondition {
+          description?: string | null;
+          roomId?: string | null;
+        }
+        const conditions = (data.knownConditions || []) as ApiCondition[];
+        const byRoom = new Map<string, string[]>();
+        const globalConds: string[] = [];
+        for (const c of conditions) {
+          const desc = c.description?.trim();
+          if (!desc) continue;
+          if (c.roomId) {
+            const list = byRoom.get(c.roomId) || [];
+            list.push(desc);
+            byRoom.set(c.roomId, list);
+          } else {
+            globalConds.push(desc);
+          }
+        }
+        knownConditionsByRoomRef.current = byRoom;
+        globalKnownConditionsRef.current = globalConds;
+
         if (mappedRooms.length > 0) {
           const firstRoom = mappedRooms[0];
           activateRoom(session, firstRoom.roomId, firstRoom.roomName);
         }
       } catch (err) {
         console.error("Failed to load baselines:", err);
+        Alert.alert(
+          "Failed to load baselines",
+          "Could not load inspection data. Check your connection and try again.",
+          [
+            { text: "Retry", onPress: () => { if (sessionRef.current) void loadBaselines(sessionRef.current); } },
+            {
+              text: "Go Back",
+              style: "destructive",
+              onPress: () => navigation.goBack(),
+            },
+          ],
+        );
       }
     },
-    [activateRoom, inspectionId],
+    [activateRoom, inspectionId, navigation],
   );
-
-  const loadKnownConditions = useCallback(async () => {
-    try {
-      const conditions = await getPropertyConditions(propertyId, {
-        activeOnly: true,
-      });
-
-      const byRoom = new Map<string, string[]>();
-      const global: string[] = [];
-
-      for (const condition of conditions) {
-        const description = condition.description?.trim();
-        if (!description) continue;
-
-        if (condition.roomId) {
-          const list = byRoom.get(condition.roomId) || [];
-          list.push(description);
-          byRoom.set(condition.roomId, list);
-        } else {
-          global.push(description);
-        }
-      }
-
-      knownConditionsByRoomRef.current = byRoom;
-      globalKnownConditionsRef.current = global;
-    } catch {
-      // Condition register unavailable should not block inspections.
-      knownConditionsByRoomRef.current = new Map();
-      globalKnownConditionsRef.current = [];
-    }
-  }, [propertyId]);
 
   /**
    * Room detection loop — processes camera frames at ~3fps for auto room detection.
@@ -550,6 +872,17 @@ export default function InspectionCameraScreen() {
     (detector: RoomDetector, session: SessionManager) => {
       const tick = async () => {
         if (session.isPaused() || !cameraRef.current) {
+          // Don't reschedule while paused — handlePause/AppState resume will restart the loop
+          roomDetectionTimerRef.current = null;
+          return;
+        }
+
+        if (!isMountedRef.current) {
+          roomDetectionTimerRef.current = null;
+          return;
+        }
+
+        if (isProcessingRef.current) {
           roomDetectionTimerRef.current = setTimeout(tick, detector.getRecommendedInterval());
           return;
         }
@@ -578,6 +911,7 @@ export default function InspectionCameraScreen() {
             const topK = detector.getTopCandidates(3);
 
             if (locked) {
+              overlayGraceUntilRef.current = Date.now() + LOCALIZATION_OVERLAY_GRACE_MS;
               setLockedBaselineInfo({
                 baselineId: locked.baseline.id,
                 imageUrl: locked.baseline.previewUrl || locked.baseline.imageUrl,
@@ -587,25 +921,42 @@ export default function InspectionCameraScreen() {
                 topCandidates: topK,
               });
 
+              syncRoomFromLockedBaseline(session, locked);
+
               // Determine localization state
               const gap = topK.length >= 2
                 ? topK[0].similarity - topK[1].similarity
                 : 1;
 
-              if (locked.similarity < 0.70) {
-                setLocalizationState("not_localized");
+              if (locked.similarity < LOCALIZATION_NOT_READY_THRESHOLD) {
+                setLocalizationState(
+                  Date.now() < overlayGraceUntilRef.current
+                    ? "localizing"
+                    : "not_localized",
+                );
+                setLocalizationStuckSince((prev) => prev ?? Date.now());
               } else if (!locked.isLocked) {
                 setLocalizationState("localizing");
-              } else if (gap < 0.05) {
+                setLocalizationStuckSince((prev) => prev ?? Date.now());
+              } else if (gap < LOCALIZATION_AMBIGUITY_GAP) {
                 setLocalizationState("ambiguous");
-              } else if (locked.similarity >= 0.85) {
+                setLocalizationStuckSince((prev) => prev ?? Date.now());
+              } else if (locked.similarity >= LOCALIZATION_LOCKED_THRESHOLD) {
                 setLocalizationState("localized");
+                setLocalizationStuckSince(null);
+              } else {
+                setLocalizationState("localizing");
+                setLocalizationStuckSince((prev) => prev ?? Date.now());
+              }
+            } else {
+              const withinOverlayGrace = Date.now() < overlayGraceUntilRef.current;
+              if (!withinOverlayGrace) {
+                setLockedBaselineInfo(null);
+                setLocalizationState("not_localized");
+                setLocalizationStuckSince((prev) => prev ?? Date.now());
               } else {
                 setLocalizationState("localizing");
               }
-            } else {
-              setLockedBaselineInfo(null);
-              setLocalizationState("not_localized");
             }
           }
         } catch {
@@ -619,7 +970,7 @@ export default function InspectionCameraScreen() {
       // Start the loop
       roomDetectionTimerRef.current = setTimeout(tick, 1000); // Initial 1s delay
     },
-    [activateRoom, updateCoverageUI],
+    [activateRoom, syncRoomFromLockedBaseline, updateCoverageUI],
   );
 
   const captureChangeFrame = useCallback(async (): Promise<Uint8Array | null> => {
@@ -673,7 +1024,7 @@ export default function InspectionCameraScreen() {
    */
   const autoCaptureTick = useCallback(
     async (session: SessionManager, comparison: ComparisonManager) => {
-      if (!cameraRef.current || paused) return;
+      if (!cameraRef.current || pausedRef.current) return;
 
       const state = session.getState();
       const currentRoomId = state.currentRoomId;
@@ -684,21 +1035,50 @@ export default function InspectionCameraScreen() {
       );
       if (!room?.baselines?.length) return;
 
-      // Use locked baseline from detector (similarity-first, not blind "first unscanned")
+      // Use locked baseline from detector if available, but fall back to best
+      // candidate when localization hasn't achieved a strong lock yet.
+      // Localization is a QUALITY signal (pick the best baseline), not a GATE.
       const detector = roomDetectorRef.current;
       const locked = detector?.getLockedBaseline();
-
-      // Auto-capture only when localized with high similarity (≥ 0.88)
-      if (!locked?.isLocked || locked.similarity < 0.88) return;
-
-      // Don't auto-capture if ambiguous (top-2 too close)
       const topK = detector?.getTopCandidates(3) || [];
-      if (topK.length >= 2) {
+
+      const isStrongLock = locked?.isLocked && locked.similarity >= LOCALIZATION_AUTO_CAPTURE_THRESHOLD;
+
+      // When strongly locked, still skip if ambiguous (top-2 too close)
+      if (isStrongLock && topK.length >= 2) {
         const gap = topK[0].similarity - topK[1].similarity;
-        if (gap < 0.05) return;
+        if (gap < LOCALIZATION_AMBIGUITY_GAP) return;
       }
 
-      const baseline = room.baselines.find(b => b.id === locked.baseline.id) || room.baselines[0];
+      // Determine which baseline to use:
+      // 1. If strongly locked, use the locked baseline
+      // 2. If not locked but we have candidates, use the best candidate
+      // 3. Fall back to first baseline in the room
+      let baseline: typeof room.baselines[0];
+      let bestSimilarity: number;
+
+      if (isStrongLock && locked) {
+        baseline = room.baselines.find(b => b.id === locked.baseline.id) || room.baselines[0];
+        bestSimilarity = locked.similarity;
+      } else if (topK.length > 0) {
+        // Use the best available candidate even without a strong lock
+        const bestCandidate = topK[0];
+        baseline = room.baselines.find(b => b.id === bestCandidate.baselineId) || room.baselines[0];
+        bestSimilarity = bestCandidate.similarity;
+
+        // If similarity is essentially zero and we've already done a first capture, wait
+        if (bestSimilarity <= 0 && hasFirstAutoCaptureRef.current) return;
+      } else if (!hasFirstAutoCaptureRef.current) {
+        // No detector results yet — use the first baseline in the room
+        // to ensure we fire a comparison within ~5-10s of camera open
+        const elapsed = Date.now() - autoCaptureStartTimeRef.current;
+        if (elapsed < 5000) return; // Wait at least 5s for detector to produce candidates
+        baseline = room.baselines[0];
+        bestSimilarity = 0;
+      } else {
+        // No candidates and we've already done the first capture — wait for localization
+        return;
+      }
 
       // Check if all angles are scanned for auto-advance
       const visit = state.visitedRooms.get(currentRoomId);
@@ -729,58 +1109,99 @@ export default function InspectionCameraScreen() {
       const apiUrl = process.env.EXPO_PUBLIC_API_URL;
       if (!apiUrl) return;
 
+      const firstCapture = await captureHighResFrame();
+      if (!firstCapture) return;
+
+      let rerankedTopK = topK;
+      try {
+        rerankedTopK = await rankCandidatesForCapturedFrame(
+          firstCapture.uri,
+          currentRoomId,
+          topK,
+        );
+      } finally {
+        FileSystem.deleteAsync(firstCapture.uri, { idempotent: true }).catch(() => {});
+      }
+
+      const selectedBaseline =
+        getBaselineById(rerankedTopK[0]?.baselineId || baseline.id) || {
+          ...baseline,
+          roomId: room.roomId,
+          roomName: room.roomName,
+        };
+      const selectedRoomId = selectedBaseline.roomId || currentRoomId;
+      const selectedRoomName = selectedBaseline.roomName || room.roomName;
       const roomKnownConditions = Array.from(
         new Set([
           ...(globalKnownConditionsRef.current || []),
-          ...(knownConditionsByRoomRef.current.get(currentRoomId) || []),
+          ...(knownConditionsByRoomRef.current.get(selectedRoomId) || []),
         ]),
       );
+      const captureFrameReranked =
+        rerankedTopK[0]?.baselineId !== topK[0]?.baselineId;
 
-      // Single-frame capture function — ComparisonManager handles burst internally
+      let reusedInitialFrame = false;
       const captureFrame = async () => {
-        if (!cameraRef.current) return null;
-        try {
-          const photo = await cameraRef.current.takePictureAsync({
-            quality: 0.7,
-            base64: true,
-          });
-          if (photo?.base64) {
-            return `data:image/jpeg;base64,${photo.base64}`;
-          }
-        } catch {
-          // Camera capture failed silently
+        if (!reusedInitialFrame) {
+          reusedInitialFrame = true;
+          return firstCapture.dataUri;
         }
-        return null;
+
+        const burstFrame = await captureHighResFrame();
+        if (!burstFrame) return null;
+        FileSystem.deleteAsync(burstFrame.uri, { idempotent: true }).catch(() => {});
+        return burstFrame.dataUri;
       };
 
-      session.recordEvent("comparison_requested", currentRoomId, {
-        baselineImageId: baseline.id,
+      session.recordEvent("comparison_requested", selectedRoomId, {
+        baselineImageId: selectedBaseline.id,
         triggerSource: "auto",
-        lockedSimilarity: locked.similarity,
-        topCandidates: topK.map(c => ({ id: c.baselineId, sim: c.similarity })),
+        lockedSimilarity: rerankedTopK[0]?.similarity ?? bestSimilarity,
+        topCandidates: rerankedTopK.map(c => ({ id: c.baselineId, sim: c.similarity })),
+        captureFrameReranked,
+        userSelectedBaselineId,
       });
 
       setLocalizationState("capturing");
+      hasFirstAutoCaptureRef.current = true;
       void comparison.triggerComparison(
         captureFrame,
-        baseline.imageUrl,
-        room.roomName,
-        currentRoomId,
+        selectedBaseline.imageUrl,
+        selectedRoomName,
+        selectedRoomId,
         {
           inspectionMode,
           knownConditions: roomKnownConditions,
           inspectionId,
-          baselineImageId: baseline.id,
+          baselineImageId: selectedBaseline.id,
           triggerSource: "auto",
           apiUrl,
           authToken: authSession.access_token,
-          clientSimilarity: locked.similarity,
-          topCandidateIds: topK.slice(0, 3).map(c => c.baselineId),
+          clientSimilarity: rerankedTopK[0]?.similarity ?? bestSimilarity,
+          topCandidateIds: rerankedTopK.slice(0, 3).map(c => c.baselineId),
+          userSelectedCandidateId: userSelectedBaselineId || undefined,
+          refreshToken: async () => {
+            const { data } = await supabase.auth.refreshSession();
+            return data.session?.access_token ?? null;
+          },
         },
       );
     },
-    [captureChangeFrame, paused, inspectionMode, inspectionId],
+    [
+      captureChangeFrame,
+      captureHighResFrame,
+      getBaselineById,
+      inspectionId,
+      inspectionMode,
+      rankCandidatesForCapturedFrame,
+      userSelectedBaselineId,
+    ],
   );
+
+  // Keep ref in sync so interval callbacks always call the latest version
+  useEffect(() => {
+    autoCapturTickRef.current = autoCaptureTick;
+  }, [autoCaptureTick]);
 
   // Manual room switching (always available — primary mode when ONNX model not loaded)
   const handleSwitchRoom = useCallback(() => {
@@ -813,16 +1234,42 @@ export default function InspectionCameraScreen() {
 
     setPaused((p) => {
       if (p) {
+        // Resuming
         session.resume();
         comparison.resume();
+        motionFilterRef.current?.start();
+
+        // Restart auto-capture interval
+        if (autoCaptureEnabledRef.current && !autoCaptureTimerRef.current) {
+          autoCaptureTimerRef.current = setInterval(() => {
+            void autoCapturTickRef.current?.(session, comparison);
+          }, AUTO_CAPTURE_INTERVAL_MS);
+        }
+
+        // Restart room detection loop
+        const detector = roomDetectorRef.current;
+        if (detector && !roomDetectionTimerRef.current) {
+          startRoomDetectionLoop(detector, session);
+        }
       } else {
+        // Pausing — stop sensors and timers to save battery
         session.pause();
         comparison.pause();
+        motionFilterRef.current?.stop();
+
+        if (autoCaptureTimerRef.current) {
+          clearInterval(autoCaptureTimerRef.current);
+          autoCaptureTimerRef.current = null;
+        }
+        if (roomDetectionTimerRef.current) {
+          clearTimeout(roomDetectionTimerRef.current);
+          roomDetectionTimerRef.current = null;
+        }
       }
       return !p;
     });
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-  }, []);
+  }, [startRoomDetectionLoop]);
 
   const handleToggleHandsFree = useCallback(() => {
     const session = sessionRef.current;
@@ -842,11 +1289,21 @@ export default function InspectionCameraScreen() {
   }, [showCaptureHint]);
 
   const handleEndInspection = useCallback(async () => {
+    if (isSubmittingRef.current) return;
+    isSubmittingRef.current = true;
+
+    // Pause capture loops to prevent late findings from being missed
+    comparisonRef.current?.pause();
+    sessionRef.current?.pause();
+
     const session = sessionRef.current;
     if (!session) {
+      isSubmittingRef.current = false;
       navigation.replace("InspectionSummary", { inspectionId, propertyId });
       return;
     }
+
+    try {
 
     const state = session.getState();
     const results: Array<{
@@ -870,8 +1327,10 @@ export default function InspectionCameraScreen() {
         (r) => r.roomId === roomId,
       );
       const firstBaseline = roomBaselines?.baselines?.[0];
+      const confirmedFindings = visit.findings.filter((f) => f.status === "confirmed");
+      const hasVerifiedCoverage = visit.anglesScanned.size > 0 || visit.bestScore !== null;
       if (!firstBaseline?.id) {
-        const confirmedCount = visit.findings.filter((f) => f.status === "confirmed").length;
+        const confirmedCount = confirmedFindings.length;
         if (confirmedCount > 0) {
           console.warn(
             `Room ${roomId} had ${confirmedCount} confirmed finding(s) but no baselines — findings dropped from submission`,
@@ -880,13 +1339,15 @@ export default function InspectionCameraScreen() {
         continue;
       }
 
+      if (!hasVerifiedCoverage && confirmedFindings.length === 0) {
+        continue;
+      }
+
       results.push({
         roomId,
         baselineImageId: firstBaseline.id,
         score: visit.bestScore ?? null,
-        findings: visit.findings
-          .filter((f) => f.status === "confirmed")
-          .map((f) => ({
+        findings: confirmedFindings.map((f) => ({
             id: f.id,
             description: f.description,
             severity: f.severity,
@@ -1001,6 +1462,9 @@ export default function InspectionCameraScreen() {
       propertyId,
       summaryData,
     });
+    } finally {
+      isSubmittingRef.current = false;
+    }
   }, [navigation, inspectionId, propertyId, inspectionMode]);
 
   // Intercept Android hardware back button to prevent data loss
@@ -1047,15 +1511,34 @@ export default function InspectionCameraScreen() {
     const locked = detector?.getLockedBaseline();
     const topK = detector?.getTopCandidates(3) || [];
 
-    if (!locked || locked.similarity < 0.50) {
-      showCaptureHint("Point camera at a trained area first.");
-      return;
+    const isStuck = localizationStuckSince != null && Date.now() - localizationStuckSince > 15000;
+
+    if (!locked || locked.similarity < 0.45) {
+      if (isStuck) {
+        // Force compare mode: localization has been failing for >15s,
+        // allow capture with whatever the best candidate is
+        const forceCandidates = detector?.getTopCandidates(3) || [];
+        if (forceCandidates.length === 0 || !room.baselines.length) {
+          showCaptureHint("No baselines available. Point camera at a trained area.");
+          return;
+        }
+        // Fall through with the top candidate regardless of similarity
+      } else {
+        showCaptureHint("Point camera at a trained area first.");
+        return;
+      }
     }
 
-    const baseline = room.baselines.find(b => b.id === locked.baseline.id) || room.baselines[0];
+    const forceCandidate = (!locked || locked.similarity < 0.45)
+      ? (detector?.getTopCandidates(3)?.[0] ?? null)
+      : null;
+    const effectiveLocked = forceCandidate
+      ? { baseline: { id: forceCandidate.baselineId }, similarity: forceCandidate.similarity }
+      : locked!;
+    const baseline = room.baselines.find(b => b.id === effectiveLocked.baseline.id) || room.baselines[0];
 
-    if (!comparison.shouldTrigger()) {
-      showCaptureHint("Hold steady or wait a moment before capturing again.");
+    if (!comparison.canTriggerManual()) {
+      showCaptureHint("Give the last capture a moment to finish.");
       return;
     }
 
@@ -1065,65 +1548,107 @@ export default function InspectionCameraScreen() {
     const {
       data: { session: authSession },
     } = await supabase.auth.getSession();
-    if (!authSession?.access_token) return;
+    if (!authSession?.access_token) {
+      showCaptureHint("Session expired. Please restart the app.");
+      return;
+    }
 
     const apiUrl = process.env.EXPO_PUBLIC_API_URL;
-    if (!apiUrl) return;
+    if (!apiUrl) {
+      showCaptureHint("Configuration error. Please restart the app.");
+      return;
+    }
 
+    const firstCapture = await captureHighResFrame();
+    if (!firstCapture) {
+      showCaptureHint("Capture failed. Try again.");
+      return;
+    }
+
+    let rerankedTopK = topK;
+    try {
+      rerankedTopK = await rankCandidatesForCapturedFrame(
+        firstCapture.uri,
+        currentRoomId,
+        topK,
+      );
+    } finally {
+      FileSystem.deleteAsync(firstCapture.uri, { idempotent: true }).catch(() => {});
+    }
+
+    const selectedBaseline =
+      getBaselineById(rerankedTopK[0]?.baselineId || baseline.id) || {
+        ...baseline,
+        roomId: room.roomId,
+        roomName: room.roomName,
+      };
+    const selectedRoomId = selectedBaseline.roomId || currentRoomId;
+    const selectedRoomName = selectedBaseline.roomName || room.roomName;
     const roomKnownConditions = Array.from(
       new Set([
         ...(globalKnownConditionsRef.current || []),
-        ...(knownConditionsByRoomRef.current.get(currentRoomId) || []),
+        ...(knownConditionsByRoomRef.current.get(selectedRoomId) || []),
       ]),
     );
+    const captureFrameReranked =
+      rerankedTopK[0]?.baselineId !== topK[0]?.baselineId;
 
+    let reusedInitialFrame = false;
     const captureFrame = async () => {
-      if (!cameraRef.current) return null;
-      try {
-        const photo = await cameraRef.current.takePictureAsync({
-          quality: 0.7,
-          base64: true,
-        });
-        if (photo?.base64) {
-          return `data:image/jpeg;base64,${photo.base64}`;
-        }
-      } catch {
-        // Camera capture failed
+      if (!reusedInitialFrame) {
+        reusedInitialFrame = true;
+        return firstCapture.dataUri;
       }
-      return null;
+
+      const burstFrame = await captureHighResFrame();
+      if (!burstFrame) return null;
+      FileSystem.deleteAsync(burstFrame.uri, { idempotent: true }).catch(() => {});
+      return burstFrame.dataUri;
     };
 
-    session.recordEvent("comparison_requested", currentRoomId, {
-      baselineImageId: baseline.id,
+    session.recordEvent("comparison_requested", selectedRoomId, {
+      baselineImageId: selectedBaseline.id,
       triggerSource: "manual",
-      lockedSimilarity: locked?.similarity,
-      topCandidates: topK.map(c => ({ id: c.baselineId, sim: c.similarity })),
+      lockedSimilarity: rerankedTopK[0]?.similarity ?? locked?.similarity,
+      topCandidates: rerankedTopK.map(c => ({ id: c.baselineId, sim: c.similarity })),
+      captureFrameReranked,
+      userSelectedBaselineId,
     });
 
     setLocalizationState("capturing");
     void comparison.triggerComparison(
       captureFrame,
-      baseline.imageUrl,
-      room.roomName,
-      currentRoomId,
+      selectedBaseline.imageUrl,
+      selectedRoomName,
+      selectedRoomId,
       {
         inspectionMode,
         knownConditions: roomKnownConditions,
         inspectionId,
-        baselineImageId: baseline.id,
+        baselineImageId: selectedBaseline.id,
         triggerSource: "manual",
         apiUrl,
         authToken: authSession.access_token,
-        clientSimilarity: locked?.similarity,
-        topCandidateIds: topK.slice(0, 3).map(c => c.baselineId),
+        clientSimilarity: rerankedTopK[0]?.similarity ?? locked?.similarity,
+        topCandidateIds: rerankedTopK.slice(0, 3).map(c => c.baselineId),
+        userSelectedCandidateId: userSelectedBaselineId || undefined,
+        refreshToken: async () => {
+          const { data } = await supabase.auth.refreshSession();
+          return data.session?.access_token ?? null;
+        },
       },
     );
   }, [
+    captureHighResFrame,
+    getBaselineById,
     paused,
     isProcessing,
     inspectionMode,
     inspectionId,
+    rankCandidatesForCapturedFrame,
     showCaptureHint,
+    userSelectedBaselineId,
+    localizationStuckSince,
   ]);
 
   const handleConfirmFinding = useCallback((findingId: string) => {
@@ -1217,14 +1742,22 @@ export default function InspectionCameraScreen() {
   }, [permission, requestPermission]);
 
   if (!permission?.granted) {
+    const canAsk = permission?.canAskAgain !== false;
     return (
       <View style={styles.permissionContainer}>
         <Text style={styles.permissionText}>Camera access is required</Text>
+        <Text style={[styles.permissionText, { fontSize: 14, marginBottom: 16, opacity: 0.7 }]}>
+          {canAsk
+            ? "Tap below to grant camera access."
+            : "Camera permission was denied. Please enable it in Settings."}
+        </Text>
         <TouchableOpacity
           style={styles.permissionButton}
-          onPress={requestPermission}
+          onPress={canAsk ? requestPermission : () => void Linking.openSettings()}
         >
-          <Text style={styles.permissionButtonText}>Grant Permission</Text>
+          <Text style={styles.permissionButtonText}>
+            {canAsk ? "Grant Permission" : "Open Settings"}
+          </Text>
         </TouchableOpacity>
       </View>
     );
@@ -1235,6 +1768,8 @@ export default function InspectionCameraScreen() {
   );
   const roomModeLabel = isAutoDetect
     ? "Auto-detect"
+    : autoDetectUnavailableReason
+      ? "Dev build required"
     : activeImageSource === "camera"
       ? null
       : activeImageSourceLabel;
@@ -1254,87 +1789,93 @@ export default function InspectionCameraScreen() {
         </View>
       </GestureDetector>
 
-      {/* Ghost overlay — shows target baseline when localized */}
-      {lockedBaselineInfo && !paused && localizationState !== "not_localized" && (
-        <View style={styles.ghostOverlay} pointerEvents="none">
-          {(localizationState === "localized" || localizationState === "localizing" || localizationState === "capturing") && (
-            <>
-              <Image
-                source={{ uri: lockedBaselineInfo.imageUrl }}
-                style={[
-                  StyleSheet.absoluteFill,
-                  { opacity: lockedBaselineInfo.isLocked ? 0.25 : 0.15 },
-                ]}
-                resizeMode="cover"
-              />
-              <View
-                style={[
-                  StyleSheet.absoluteFill,
-                  {
-                    borderColor: getSimilarityColor(lockedBaselineInfo.similarity),
-                    borderWidth: lockedBaselineInfo.isLocked ? 3 : 2,
-                  },
-                ]}
-              />
-            </>
-          )}
-
-          {/* Baseline thumbnail (bottom-left) */}
-          <View style={styles.baselineThumbnail}>
-            <Image
-              source={{ uri: lockedBaselineInfo.imageUrl }}
-              style={{ width: 72, height: 54, borderRadius: 6 }}
-              resizeMode="cover"
-            />
-            <Text style={styles.baselineThumbnailLabel} numberOfLines={1}>
-              {lockedBaselineInfo.label || "Target view"}
-            </Text>
-          </View>
-
-          {/* Similarity badge (bottom-right) */}
-          <View style={styles.similarityBadge}>
+      {/* Border indicator when localized — color reflects similarity, pulses when green */}
+      {lockedBaselineInfo && !paused && lockedBaselineInfo.isLocked && (() => {
+        const borderColor = getSimilarityColor(lockedBaselineInfo.similarity);
+        const isGreen = lockedBaselineInfo.similarity >= 0.55;
+        return (
+          <Animated.View
+            style={[
+              styles.ghostOverlay,
+              { opacity: isGreen ? borderPulseAnim : 1 },
+            ]}
+            pointerEvents="none"
+          >
             <View
               style={[
-                styles.similarityDot,
-                { backgroundColor: getSimilarityColor(lockedBaselineInfo.similarity) },
+                StyleSheet.absoluteFill,
+                {
+                  borderColor,
+                  borderWidth: isGreen ? 5 : 4,
+                  borderRadius: 2,
+                  shadowColor: borderColor,
+                  shadowRadius: 8,
+                  shadowOpacity: 0.6,
+                  shadowOffset: { width: 0, height: 0 },
+                },
               ]}
             />
-            <Text style={styles.similarityText}>
-              {Math.round(lockedBaselineInfo.similarity * 100)}%
-            </Text>
-          </View>
+          </Animated.View>
+        );
+      })()}
 
-          {/* Ambiguous: dual thumbnails when top-2 are too close */}
-          {localizationState === "ambiguous" && lockedBaselineInfo.topCandidates.length >= 2 && (
+      {lockedBaselineInfo &&
+        !paused &&
+        (localizationState === "ambiguous" || showTargetAssist) && (
+          <View style={styles.targetAssistStrip}>
+            <Text style={styles.targetAssistLabel}>
+              {showTargetAssist ? "Which view are you looking at?" : "Move closer to distinguish views"}
+            </Text>
             <View style={styles.ambiguousThumbnails}>
-              {lockedBaselineInfo.topCandidates.slice(0, 2).map((candidate) => {
-                const bl = baselinesRef.current
-                  .flatMap(r => r.baselines)
-                  .find(b => b.id === candidate.baselineId);
-                if (!bl) return null;
+              {lockedBaselineInfo.topCandidates.slice(0, 3).map((candidate) => {
+                const baseline = getBaselineById(candidate.baselineId);
+                if (!baseline) return null;
+                const isSelected = userSelectedBaselineId === candidate.baselineId;
+
                 return (
-                  <View key={candidate.baselineId} style={styles.ambiguousThumb}>
+                  <TouchableOpacity
+                    key={candidate.baselineId}
+                    style={[
+                      styles.ambiguousThumb,
+                      isSelected && styles.ambiguousThumbSelected,
+                      !showTargetAssist && styles.ambiguousThumbPassive,
+                    ]}
+                    disabled={!showTargetAssist}
+                    activeOpacity={0.8}
+                    onPress={() => {
+                      setUserSelectedBaselineId(candidate.baselineId);
+                      showCaptureHint("View selected");
+                    }}
+                  >
                     <Image
-                      source={{ uri: bl.imageUrl }}
-                      style={{ width: 64, height: 48, borderRadius: 6 }}
+                      source={{ uri: baseline.previewUrl || baseline.imageUrl }}
+                      style={styles.ambiguousThumbImage}
                       resizeMode="cover"
                     />
-                    <Text style={styles.ambiguousThumbScore}>
-                      {Math.round(candidate.similarity * 100)}%
-                    </Text>
-                  </View>
+                    {baseline.label ? (
+                      <Text style={styles.ambiguousThumbLabel} numberOfLines={2}>
+                        {baseline.label}
+                      </Text>
+                    ) : null}
+                    {showTargetAssist && (
+                      <Text style={styles.ambiguousThumbHint}>
+                        {isSelected ? "Selected" : "Tap"}
+                      </Text>
+                    )}
+                  </TouchableOpacity>
                 );
               })}
             </View>
-          )}
-        </View>
-      )}
+          </View>
+        )}
 
       {/* Localization guidance */}
       {!paused && localizationState !== "localized" && localizationState !== "capturing" && (
         <View style={styles.localizationGuide} pointerEvents="none">
           <Text style={styles.localizationGuideText}>
-            {getLocalizationGuidance(localizationState)}
+            {localizationState === "not_localized" && autoDetectUnavailableReason
+              ? autoDetectUnavailableReason
+              : getLocalizationGuidance(localizationState)}
           </Text>
         </View>
       )}
@@ -2148,61 +2689,63 @@ const styles = StyleSheet.create({
     ...StyleSheet.absoluteFillObject,
     zIndex: 3,
   },
-  baselineThumbnail: {
+  targetAssistStrip: {
     position: "absolute",
-    bottom: 140,
+    bottom: 182,
     left: 16,
-    backgroundColor: "rgba(0,0,0,0.7)",
-    borderRadius: 8,
-    padding: 4,
-    alignItems: "center",
-  },
-  baselineThumbnailLabel: {
-    color: "rgba(255,255,255,0.8)",
-    fontSize: 10,
-    fontWeight: "500",
-    marginTop: 2,
-    maxWidth: 72,
-  },
-  similarityBadge: {
-    position: "absolute",
-    bottom: 140,
     right: 16,
-    backgroundColor: "rgba(0,0,0,0.7)",
-    borderRadius: 12,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    flexDirection: "row",
+    zIndex: 6,
     alignItems: "center",
-    gap: 6,
+    gap: 8,
   },
-  similarityDot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-  },
-  similarityText: {
+  targetAssistLabel: {
     color: "#fff",
-    fontSize: 13,
+    fontSize: 12,
     fontWeight: "600",
+    backgroundColor: "rgba(0,0,0,0.65)",
+    borderRadius: 999,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
   },
   ambiguousThumbnails: {
-    position: "absolute",
-    bottom: 140,
-    alignSelf: "center",
     flexDirection: "row",
     gap: 12,
-    backgroundColor: "rgba(0,0,0,0.7)",
+    backgroundColor: "rgba(15,23,42,0.82)",
     borderRadius: 10,
     padding: 8,
   },
   ambiguousThumb: {
     alignItems: "center",
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.14)",
+    padding: 6,
+    backgroundColor: "rgba(15,23,42,0.82)",
   },
-  ambiguousThumbScore: {
-    color: "#fff",
+  ambiguousThumbPassive: {
+    opacity: 0.9,
+  },
+  ambiguousThumbSelected: {
+    borderColor: "rgba(34,197,94,0.7)",
+    backgroundColor: "rgba(34,197,94,0.14)",
+  },
+  ambiguousThumbImage: {
+    width: 100,
+    height: 75,
+    borderRadius: 6,
+  },
+  ambiguousThumbLabel: {
+    color: "rgba(255,255,255,0.88)",
     fontSize: 10,
-    fontWeight: "600",
+    fontWeight: "500",
+    marginTop: 4,
+    textAlign: "center" as const,
+    maxWidth: 100,
+  },
+  ambiguousThumbHint: {
+    color: "rgba(255,255,255,0.74)",
+    fontSize: 9,
+    fontWeight: "500",
     marginTop: 2,
   },
   localizationGuide: {

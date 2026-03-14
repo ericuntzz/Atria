@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useRef } from "react";
 import {
   View,
   Text,
@@ -18,8 +18,11 @@ export default function LoginScreen() {
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const signingInRef = useRef(false);
 
   const handleLogin = async () => {
+    if (signingInRef.current) return;
+    signingInRef.current = true;
     setLoading(true);
     setError(null);
 
@@ -31,6 +34,9 @@ export default function LoginScreen() {
     if (authError) {
       setError(authError.message);
     }
+    // Always reset the guard — on success, the auth listener navigates away;
+    // on error, the user needs to retry. Either way, unlock the button.
+    signingInRef.current = false;
     setLoading(false);
   };
 

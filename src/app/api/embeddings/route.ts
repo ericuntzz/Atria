@@ -43,16 +43,6 @@ export async function POST(request: NextRequest) {
   const { imageIds, propertyId, imageUrls } = body;
   const hasRealModel = await hasRealEmbeddingModel();
 
-  if (!hasRealModel && !ALLOW_PLACEHOLDER_EMBEDDINGS) {
-    return NextResponse.json(
-      {
-        error:
-          "Embedding model is unavailable. Provision the MobileCLIP ONNX model first (see docs/ONNX_MODEL_SETUP.md) or set ALLOW_PLACEHOLDER_EMBEDDINGS=1 for local development only.",
-      },
-      { status: 503 },
-    );
-  }
-
   // Mode 1: Generate embeddings for arbitrary image URLs (no storage)
   if (imageUrls && Array.isArray(imageUrls) && imageUrls.length > 0) {
     if (imageUrls.length > MAX_EMBEDDINGS_PER_REQUEST) {
@@ -70,21 +60,48 @@ export async function POST(request: NextRequest) {
         );
       }
     }
-    const embeddings = await Promise.all(
-      imageUrls.map(async (url: string) => ({
-        url,
-        embedding: await generateEmbeddingWithOptions(url, {
+
+    const embeddings: Array<{
+      url: string;
+      embedding: number[] | null;
+      modelVersion: string;
+      error?: string;
+    }> = [];
+
+    for (const url of imageUrls as string[]) {
+      try {
+        const embedding = await generateEmbeddingWithOptions(url, {
           allowPlaceholder: ALLOW_PLACEHOLDER_EMBEDDINGS,
-        }),
-        modelVersion: getModelVersion(),
-      })),
-    );
+        });
+        embeddings.push({
+          url,
+          embedding,
+          modelVersion: getModelVersion(),
+        });
+      } catch (error) {
+        embeddings.push({
+          url,
+          embedding: null,
+          modelVersion: getModelVersion(),
+          error: error instanceof Error ? error.message : "Embedding generation failed",
+        });
+      }
+    }
 
     return NextResponse.json({ embeddings });
   }
 
   // Mode 2: Generate embeddings for specific baseline image IDs
   if (imageIds && Array.isArray(imageIds) && imageIds.length > 0) {
+    if (!hasRealModel && !ALLOW_PLACEHOLDER_EMBEDDINGS) {
+      return NextResponse.json(
+        {
+          error:
+            "Embedding model is unavailable. Provision the MobileCLIP ONNX model first (see docs/ONNX_MODEL_SETUP.md) or set ALLOW_PLACEHOLDER_EMBEDDINGS=1 for local development only.",
+        },
+        { status: 503 },
+      );
+    }
     if (imageIds.length > MAX_EMBEDDINGS_PER_REQUEST) {
       return NextResponse.json(
         { error: `Too many image IDs. Maximum is ${MAX_EMBEDDINGS_PER_REQUEST}` },
@@ -172,6 +189,15 @@ export async function POST(request: NextRequest) {
 
   // Mode 3: Generate embeddings for all baselines of a property
   if (propertyId && typeof propertyId === "string") {
+    if (!hasRealModel && !ALLOW_PLACEHOLDER_EMBEDDINGS) {
+      return NextResponse.json(
+        {
+          error:
+            "Embedding model is unavailable. Provision the MobileCLIP ONNX model first (see docs/ONNX_MODEL_SETUP.md) or set ALLOW_PLACEHOLDER_EMBEDDINGS=1 for local development only.",
+        },
+        { status: 503 },
+      );
+    }
     if (!isValidUUID(propertyId)) {
       return NextResponse.json(
         { error: "Invalid propertyId" },

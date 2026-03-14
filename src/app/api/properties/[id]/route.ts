@@ -4,6 +4,7 @@ import { db } from "@/server/db";
 import { properties } from "@/server/schema";
 import { eq, and } from "drizzle-orm";
 import { emitEventSafe } from "@/lib/events/emit";
+import { deleteOwnedPropertyGraph } from "@/lib/properties/delete-property-graph";
 
 // GET /api/properties/[id] - Get a single property
 export async function GET(
@@ -136,9 +137,10 @@ export async function DELETE(
       return NextResponse.json({ error: "Not found" }, { status: 404 });
     }
 
-    await db
-      .delete(properties)
-      .where(eq(properties.id, id));
+    const deletedIds = await deleteOwnedPropertyGraph(dbUser.id, [id]);
+    if (deletedIds.length === 0) {
+      return NextResponse.json({ error: "Not found" }, { status: 404 });
+    }
 
     // Emit audit event for property deletion
     await emitEventSafe({
@@ -157,7 +159,12 @@ export async function DELETE(
   } catch (error) {
     console.error("[properties/[id]] DELETE error:", error);
     return NextResponse.json(
-      { error: "Internal server error" },
+      {
+        error:
+          process.env.NODE_ENV === "development" && error instanceof Error
+            ? error.message
+            : "Internal server error",
+      },
       { status: 500 },
     );
   }

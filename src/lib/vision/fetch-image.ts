@@ -25,6 +25,10 @@ export async function fetchImageBuffer(
     const res = await fetch(imageUrl, { signal: AbortSignal.timeout(timeoutMs) });
     if (!res.ok) return null;
     const arrayBuffer = await res.arrayBuffer();
+    if (arrayBuffer.byteLength === 0) {
+      console.warn("[fetch-image] Received empty image payload:", imageUrl);
+      return null;
+    }
     return Buffer.from(arrayBuffer);
   } catch {
     return null;

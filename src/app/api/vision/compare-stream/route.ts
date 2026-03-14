@@ -2,8 +2,8 @@ import { NextRequest } from "next/server";
 import { getDbUser, isValidUUID, isSafeUrl } from "@/lib/auth";
 import { compareImages, type InspectionMode } from "@/lib/vision/compare";
 import { db } from "@/server/db";
-import { inspections } from "@/server/schema";
-import { eq, and } from "drizzle-orm";
+import { baselineImages, baselineVersions, inspections, rooms } from "@/server/schema";
+import { eq, and, inArray } from "drizzle-orm";
 import { emitEventSafe } from "@/lib/events/emit";
 
 /**
@@ -59,6 +59,7 @@ export async function POST(request: NextRequest) {
     baselineImageId,
     clientSimilarity,
     topCandidateIds,
+    userSelectedCandidateId,
   } = body;
 
   if (!baselineUrl || !currentImages || !roomName) {
@@ -119,6 +120,15 @@ export async function POST(request: NextRequest) {
       { status: 400, headers: { "Content-Type": "application/json" } },
     );
   }
+  if (
+    userSelectedCandidateId &&
+    (typeof userSelectedCandidateId !== "string" || !isValidUUID(userSelectedCandidateId))
+  ) {
+    return new Response(
+      JSON.stringify({ error: "Invalid userSelectedCandidateId format" }),
+      { status: 400, headers: { "Content-Type": "application/json" } },
+    );
+  }
 
   // Validate ownership if persisting results
   let inspectionPropertyId: string | undefined;
@@ -148,6 +158,76 @@ export async function POST(request: NextRequest) {
   const validatedMode: InspectionMode = typeof inspectionMode === "string" && VALID_MODES.includes(inspectionMode as InspectionMode)
     ? (inspectionMode as InspectionMode)
     : "turnover";
+
+  const validatedClientSimilarity =
+    typeof clientSimilarity === "number" && clientSimilarity >= 0 && clientSimilarity <= 1
+      ? clientSimilarity
+      : undefined;
+  const validatedTopCandidateIds =
+    Array.isArray(topCandidateIds) &&
+    topCandidateIds.every((id: unknown) => typeof id === "string" && isValidUUID(id as string)) &&
+    topCandidateIds.length <= 5
+      ? (topCandidateIds as string[])
+      : undefined;
+  const validatedUserSelectedCandidateId =
+    typeof userSelectedCandidateId === "string" && isValidUUID(userSelectedCandidateId)
+      ? userSelectedCandidateId
+      : undefined;
+
+  let scopedCandidateBaselines:
+    | Array<{
+        id: string;
+        imageUrl: string;
+        verificationImageUrl?: string | null;
+        embedding?: number[] | null;
+      }>
+    | undefined;
+  if (validatedTopCandidateIds?.length && inspectionPropertyId) {
+    const scopedRows = await db
+      .select({
+        id: baselineImages.id,
+        imageUrl: baselineImages.imageUrl,
+        verificationImageUrl: baselineImages.verificationImageUrl,
+        embedding: baselineImages.embedding,
+      })
+      .from(baselineImages)
+      .innerJoin(rooms, eq(baselineImages.roomId, rooms.id))
+      .innerJoin(
+        baselineVersions,
+        eq(baselineImages.baselineVersionId, baselineVersions.id),
+      )
+      .where(
+        and(
+          inArray(baselineImages.id, validatedTopCandidateIds),
+          eq(baselineImages.isActive, true),
+          eq(rooms.propertyId, inspectionPropertyId),
+          eq(baselineVersions.propertyId, inspectionPropertyId),
+          eq(baselineVersions.isActive, true),
+        ),
+      );
+
+    if (scopedRows.length !== validatedTopCandidateIds.length) {
+      return new Response(
+        JSON.stringify({ error: "One or more candidate baselines were out of scope" }),
+        { status: 400, headers: { "Content-Type": "application/json" } },
+      );
+    }
+
+    const byId = new Map(scopedRows.map((row) => [row.id, row]));
+    scopedCandidateBaselines = validatedTopCandidateIds
+      .map((id) => byId.get(id))
+      .filter((row): row is NonNullable<typeof row> => Boolean(row));
+
+    if (
+      validatedUserSelectedCandidateId &&
+      !scopedCandidateBaselines.some((candidate) => candidate.id === validatedUserSelectedCandidateId)
+    ) {
+      return new Response(
+        JSON.stringify({ error: "Selected candidate was out of scope" }),
+        { status: 400, headers: { "Content-Type": "application/json" } },
+      );
+    }
+  }
 
   // Create SSE stream
   const encoder = new TextEncoder();
@@ -183,18 +263,6 @@ export async function POST(request: NextRequest) {
           });
         }
 
-        // Validate new optional fields
-        const validatedClientSimilarity =
-          typeof clientSimilarity === "number" && clientSimilarity >= 0 && clientSimilarity <= 1
-            ? clientSimilarity
-            : undefined;
-        const validatedTopCandidateIds =
-          Array.isArray(topCandidateIds) &&
-          topCandidateIds.every((id: unknown) => typeof id === "string" && isValidUUID(id as string)) &&
-          topCandidateIds.length <= 5
-            ? (topCandidateIds as string[])
-            : undefined;
-
         // Run comparison
         const result = await compareImages({
           baselineImage: baselineUrl as string,
@@ -206,9 +274,12 @@ export async function POST(request: NextRequest) {
           currentImagesAreBase64: true,
           topCandidateIds: validatedTopCandidateIds,
           clientSimilarity: validatedClientSimilarity,
+          userSelectedCandidateId: validatedUserSelectedCandidateId,
+          candidateBaselines: scopedCandidateBaselines,
         });
 
         if (inspectionId && roomId && baselineImageId) {
+          const geometricDiagnostics = result.diagnostics?.geometricVerification;
           await emitEventSafe({
             eventType: "ComparisonReceived",
             aggregateId: inspectionId as string,
@@ -222,13 +293,24 @@ export async function POST(request: NextRequest) {
               latencyMs: Date.now() - compareStartedAt,
               clientSimilarity: validatedClientSimilarity,
               topCandidateIds: validatedTopCandidateIds,
+              verifiedCandidateId: result.verifiedBaselineId ?? undefined,
+              gateDecision: result.status,
+              serverEmbeddingSimilarity:
+                geometricDiagnostics?.serverEmbeddingSimilarity,
+              candidatesAttempted: geometricDiagnostics?.candidatesAttempted,
+              geometricVerified: geometricDiagnostics?.verified,
+              geometricInliers: geometricDiagnostics?.inlierCount,
+              geometricInlierRatio: geometricDiagnostics?.inlierRatio,
+              geometricInlierSpread: geometricDiagnostics?.inlierSpread,
+              geometricOverlapArea: geometricDiagnostics?.overlapArea,
+              rejectionReasons: geometricDiagnostics?.rejectionReasons,
               skippedByPreflight: result.diagnostics?.skippedByPreflight,
               preflightReason: result.diagnostics?.preflight?.reason,
               preflightSsim: result.diagnostics?.preflight?.ssim,
               preflightDiffPercent:
                 result.diagnostics?.preflight?.diffPercent,
               preflightAlignmentScore:
-                result.diagnostics?.preflight?.alignment.score,
+                result.diagnostics?.preflight?.alignment?.score,
             },
             metadata: {
               source: "mobile",

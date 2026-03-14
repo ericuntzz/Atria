@@ -258,8 +258,8 @@ function PropertiesTab({
         </Button>
       </div>
 
-      {/* Quick Stats — horizontal scroll on mobile */}
-      <div className="flex gap-3 overflow-x-auto pb-1 mb-5 lg:mb-8 scrollbar-hide lg:grid lg:grid-cols-3 lg:gap-4 lg:overflow-visible">
+      {/* Quick Stats — horizontal scroll on mobile, grid on md+ */}
+      <div className="flex gap-3 overflow-x-auto pb-1 mb-5 lg:mb-8 scrollbar-hide md:grid md:grid-cols-3 md:gap-4 md:overflow-visible">
         <StatCard
           label="Properties"
           value={loading ? "--" : properties.length}
@@ -337,14 +337,14 @@ function PropertiesTab({
       ) : (
         <>
           {/* Mobile: compact list cards */}
-          <div className="space-y-3 lg:hidden">
+          <div className="space-y-3 md:hidden">
             {filteredAndSorted.map((property) => (
               <MobilePropertyCard key={property.id} property={property} />
             ))}
           </div>
 
-          {/* Desktop: grid cards */}
-          <div className="hidden lg:grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          {/* Tablet/Desktop: grid cards */}
+          <div className="hidden md:grid gap-4 md:grid-cols-2 lg:grid-cols-3">
             {filteredAndSorted.map((property) => (
               <DesktopPropertyCard key={property.id} property={property} />
             ))}
@@ -765,7 +765,7 @@ function StatCard({
   icon: React.ReactNode;
 }) {
   return (
-    <div className="min-w-[150px] flex-shrink-0 lg:min-w-0 lg:flex-shrink rounded-2xl bg-card border border-border p-4">
+    <div className="min-w-[150px] flex-shrink-0 md:min-w-0 md:flex-shrink rounded-2xl bg-card border border-border p-4">
       <div className="flex items-center justify-between mb-2">
         <span className="text-xs font-medium text-muted-foreground truncate">{label}</span>
         <div className="h-7 w-7 rounded-lg bg-primary/10 flex items-center justify-center">
@@ -856,9 +856,9 @@ function DesktopPropertyCard({ property }: { property: Property }) {
             />
           )}
         </div>
-        <CardHeader className="pb-2 overflow-hidden">
-          <div className="flex items-center justify-between gap-2 min-w-0">
-            <CardTitle className="text-base text-foreground group-hover:text-primary transition-colors truncate min-w-0" title={property.name}>
+        <CardHeader className="pb-2 overflow-hidden min-w-0">
+          <div className="flex items-center justify-between gap-2 min-w-0 overflow-hidden">
+            <CardTitle className="text-sm md:text-base text-foreground group-hover:text-primary transition-colors truncate min-w-0 flex-1" title={property.name}>
               {property.name}
             </CardTitle>
             <TrainingBadge status={property.trainingStatus} />
@@ -875,8 +875,8 @@ function DesktopPropertyCard({ property }: { property: Property }) {
           )}
         </CardHeader>
         <CardContent>
-          <div className="flex items-center justify-between">
-            <div className="flex gap-3 text-xs text-muted-foreground">
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground min-w-0">
               {property.readinessScore != null && (
                 <span className={`font-medium font-mono ${getScoreColor(property.readinessScore)}`}>
                   {property.readinessScore}/100

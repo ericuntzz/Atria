@@ -148,6 +148,20 @@ export interface ComparisonReceivedPayload {
   latencyMs: number;
   clientSimilarity?: number;
   topCandidateIds?: string[];
+  verifiedCandidateId?: string;
+  gateDecision?:
+    | "localized_changed"
+    | "localized_no_change"
+    | "localization_failed"
+    | "comparison_unavailable";
+  serverEmbeddingSimilarity?: number;
+  candidatesAttempted?: number;
+  geometricVerified?: boolean;
+  geometricInliers?: number;
+  geometricInlierRatio?: number;
+  geometricInlierSpread?: number;
+  geometricOverlapArea?: number;
+  rejectionReasons?: string[];
   skippedByPreflight?: boolean;
   preflightReason?: string;
   preflightSsim?: number;

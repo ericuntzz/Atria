@@ -15,6 +15,7 @@ import {
   runVerificationCascade,
   type GeometricVerifyResult,
 } from "@/lib/vision/geometric-verify";
+import { generateEmbeddingFromBuffer } from "@/lib/vision/embeddings";
 
 export interface ComparisonFinding {
   category: "missing" | "moved" | "cleanliness" | "damage" | "inventory" | "operational" | "safety" | "restock" | "presentation";
@@ -26,10 +27,19 @@ export interface ComparisonFinding {
   objectClass?: "fixed" | "durable_movable" | "decorative" | "consumable";
 }
 
+export type ComparisonStatus =
+  | "localized_changed"
+  | "localized_no_change"
+  | "localization_failed"
+  | "comparison_unavailable";
+
 export interface ComparisonResult {
+  status: ComparisonStatus;
   findings: ComparisonFinding[];
   summary: string;
   readiness_score: number | null;
+  verifiedBaselineId: string | null;
+  userGuidance: string;
   diagnostics?: {
     model?: string;
     aiLatencyMs?: number;
@@ -37,6 +47,9 @@ export interface ComparisonResult {
     preflight?: PreflightGateResult;
     geometricVerification?: {
       verified: boolean;
+      verifiedCandidateId: string | null;
+      candidatesAttempted: number;
+      serverEmbeddingSimilarity?: number;
       inlierCount: number;
       inlierRatio: number;
       inlierSpread: number;
@@ -72,13 +85,61 @@ export interface CompareImagesOptions {
   topCandidateIds?: string[];
   /** Client-side embedding similarity — telemetry only, never used for gating */
   clientSimilarity?: number;
+  /** User-selected candidate hint from the client — never bypasses verification */
+  userSelectedCandidateId?: string;
+  /** Scoped baseline candidates resolved by the API route for server reranking */
+  candidateBaselines?: Array<{
+    id: string;
+    imageUrl: string;
+    verificationImageUrl?: string | null;
+    embedding?: number[] | null;
+  }>;
 }
 
 // Failure result: null score signals "not evaluated" (never confused with a pass)
 const EMPTY_RESULT: ComparisonResult = {
+  status: "comparison_unavailable",
   findings: [],
   readiness_score: null,
   summary: "Not evaluated",
+  verifiedBaselineId: null,
+  userGuidance: "Try again in a moment.",
+};
+
+const FALLBACK_CANDIDATE_ID = "__requested_baseline__";
+
+interface ParsedAiResponse {
+  findings: ComparisonFinding[];
+  summary: string;
+  readiness_score: number | null;
+}
+
+type PreparedImageData = {
+  base64: string;
+  mediaType: string;
+};
+
+type VerificationCandidate = {
+  id: string;
+  imageUrl: string;
+  verificationImageUrl?: string | null;
+  embedding?: number[] | null;
+  serverEmbeddingSimilarity?: number;
+  verificationGray?: {
+    gray: Buffer;
+    width: number;
+    height: number;
+  };
+};
+
+type PreparedCurrentFrame = {
+  data: PreparedImageData;
+  buffer: Buffer;
+  gray: {
+    gray: Buffer;
+    width: number;
+    height: number;
+  };
 };
 
 // Geometric verifier singleton (lazy-init, reused across requests)
@@ -259,6 +320,117 @@ async function fetchImageAsBase64(
   }
 }
 
+async function prepareImageData(
+  input: string,
+  inputIsBase64: boolean,
+): Promise<PreparedImageData | null> {
+  if (inputIsBase64) {
+    return {
+      base64: stripDataUriPrefix(input),
+      mediaType: inferMediaTypeFromDataUri(input) || "image/jpeg",
+    };
+  }
+
+  return fetchImageAsBase64(input);
+}
+
+function cosineSimilarity(a: number[], b: number[]): number {
+  if (a.length !== b.length || a.length === 0) return Number.NEGATIVE_INFINITY;
+  let dot = 0;
+  let normA = 0;
+  let normB = 0;
+  for (let i = 0; i < a.length; i++) {
+    dot += a[i] * b[i];
+    normA += a[i] * a[i];
+    normB += b[i] * b[i];
+  }
+  const denom = Math.sqrt(normA) * Math.sqrt(normB);
+  return denom === 0 ? Number.NEGATIVE_INFINITY : dot / denom;
+}
+
+function scoreVerificationAttempt(result: GeometricVerifyResult | null): number {
+  if (!result) return Number.NEGATIVE_INFINITY;
+  return (
+    (result.verified ? 1000 : 0) +
+    result.inlierCount * 5 +
+    result.inlierRatio * 100 +
+    result.inlierSpread * 25 +
+    result.overlapArea * 20
+  );
+}
+
+function buildLocalizationFailedResult(
+  verificationResult: GeometricVerifyResult | null,
+  options: {
+    verifiedCandidateId?: string | null;
+    candidatesAttempted?: number;
+    serverEmbeddingSimilarity?: number;
+    preflight?: PreflightGateResult;
+  } = {},
+): ComparisonResult {
+  return {
+    ...EMPTY_RESULT,
+    status: "localization_failed",
+    summary: verificationResult?.userGuidance || "Could not verify this view.",
+    userGuidance:
+      verificationResult?.userGuidance || "Try a slightly different angle.",
+    verifiedBaselineId:
+      options.verifiedCandidateId && options.verifiedCandidateId !== FALLBACK_CANDIDATE_ID
+        ? options.verifiedCandidateId
+        : null,
+    diagnostics: {
+      skippedByPreflight: true,
+      preflight: options.preflight,
+      model: "geometric-verify",
+      geometricVerification: {
+        verified: false,
+        verifiedCandidateId:
+          options.verifiedCandidateId && options.verifiedCandidateId !== FALLBACK_CANDIDATE_ID
+            ? options.verifiedCandidateId
+            : null,
+        candidatesAttempted: options.candidatesAttempted || 0,
+        serverEmbeddingSimilarity: options.serverEmbeddingSimilarity,
+        inlierCount: verificationResult?.inlierCount || 0,
+        inlierRatio: verificationResult?.inlierRatio || 0,
+        inlierSpread: verificationResult?.inlierSpread || 0,
+        overlapArea: verificationResult?.overlapArea || 0,
+        rejectionReasons: verificationResult?.rejectionReasons || ["localization_failed"],
+      },
+    },
+  };
+}
+
+function buildComparisonUnavailableResult(
+  summary: string,
+  userGuidance: string,
+  options: {
+    verifiedBaselineId?: string | null;
+    preflight?: PreflightGateResult;
+    geometricVerification?: ComparisonResult["diagnostics"] extends infer D
+      ? D extends { geometricVerification?: infer G }
+        ? G
+        : never
+      : never;
+    model?: string;
+    aiLatencyMs?: number;
+  } = {},
+): ComparisonResult {
+  return {
+    ...EMPTY_RESULT,
+    status: "comparison_unavailable",
+    summary,
+    userGuidance,
+    verifiedBaselineId: options.verifiedBaselineId || null,
+    diagnostics: {
+      skippedByPreflight: false,
+      preflight: options.preflight,
+      model: options.model,
+      aiLatencyMs: options.aiLatencyMs,
+      geometricVerification: options.geometricVerification,
+    },
+  };
+}
+
 /**
  * Compare baseline and current images using Claude Vision API.
  *
@@ -277,144 +449,292 @@ export async function compareImages(
     isBase64 = false,
     baselineIsBase64,
     currentImagesAreBase64,
+    candidateBaselines = [],
+    userSelectedCandidateId,
   } = options;
   const baselineInputIsBase64 = baselineIsBase64 ?? isBase64;
   const currentInputAreBase64 = currentImagesAreBase64 ?? isBase64;
 
   try {
-    // Prepare baseline image
-    let baselineData: { base64: string; mediaType: string };
-    if (baselineInputIsBase64) {
-      baselineData = {
-        base64: stripDataUriPrefix(baselineImage),
-        mediaType: inferMediaTypeFromDataUri(baselineImage) || "image/jpeg",
-      };
-    } else {
-      const fetched = await fetchImageAsBase64(baselineImage);
-      if (!fetched) {
-        return { ...EMPTY_RESULT, summary: "Failed to fetch baseline image" };
-      }
-      baselineData = fetched;
+    const baselineData = await prepareImageData(baselineImage, baselineInputIsBase64);
+    if (!baselineData) {
+      return buildComparisonUnavailableResult(
+        "Failed to load the reference image.",
+        "Try again in a moment.",
+      );
     }
 
-    // Prepare current image(s) — skip individual fetch failures instead of aborting
-    const currentData: { base64: string; mediaType: string }[] = [];
+    const currentData: PreparedImageData[] = [];
     for (const img of currentImages) {
-      if (currentInputAreBase64) {
-        currentData.push({
-          base64: stripDataUriPrefix(img),
-          mediaType: inferMediaTypeFromDataUri(img) || "image/jpeg",
-        });
-      } else {
-        const fetched = await fetchImageAsBase64(img);
-        if (!fetched) {
-          console.warn(`[compare] Skipping current image that failed to fetch: ${img.slice(0, 120)}`);
-          continue;
-        }
-        currentData.push(fetched);
+      const prepared = await prepareImageData(img, currentInputAreBase64);
+      if (!prepared) {
+        console.warn(
+          `[compare] Skipping current image that failed to fetch: ${img.slice(0, 120)}`,
+        );
+        continue;
       }
+      currentData.push(prepared);
     }
 
     if (currentData.length === 0) {
-      return { ...EMPTY_RESULT, summary: "Failed to fetch any current images" };
+      return buildComparisonUnavailableResult(
+        "Failed to read the captured image.",
+        "Capture again and retry.",
+      );
     }
 
     // Guard: skip AI call if baseline or current images have empty base64 data
     if (!baselineData.base64 || baselineData.base64.length < 100) {
       console.warn("[compare] Baseline image is empty or too small, skipping AI call");
-      return { ...EMPTY_RESULT, summary: "Baseline image unavailable" };
+      return buildComparisonUnavailableResult(
+        "Reference image unavailable.",
+        "Try again in a moment.",
+      );
     }
     const validCurrentData = currentData.filter(d => d.base64 && d.base64.length >= 100);
     if (validCurrentData.length === 0) {
       console.warn("[compare] All current images are empty, skipping AI call");
-      return { ...EMPTY_RESULT, summary: "Current image unavailable" };
+      return buildComparisonUnavailableResult(
+        "Captured image unavailable.",
+        "Capture again and retry.",
+      );
     }
 
-    // Run geometric verification if we have image data
-    let geometricResult: GeometricVerifyResult | null = null;
-    try {
-      const baselineBuffer = Buffer.from(baselineData.base64, "base64");
-      const currentBuffer = Buffer.from(validCurrentData[0].base64, "base64");
+    const currentFrames = await Promise.all(
+      validCurrentData.map(async (data): Promise<PreparedCurrentFrame> => {
+        const buffer = Buffer.from(data.base64, "base64");
+        return {
+          data,
+          buffer,
+          gray: await imageToGrayscale(buffer),
+        };
+      }),
+    );
 
-      const baselineGray = await imageToGrayscale(baselineBuffer);
-      const currentGray = await imageToGrayscale(currentBuffer);
+    const currentBuffer = currentFrames[0].buffer;
 
-      const verifier = getVerifier();
-      const targetWidth = Math.min(baselineGray.width, currentGray.width);
-      const targetHeight = Math.min(baselineGray.height, currentGray.height);
+    let currentEmbedding: number[] | undefined;
+    if (
+      candidateBaselines.length > 0 &&
+      candidateBaselines.some(
+        (candidate) => Array.isArray(candidate.embedding) && candidate.embedding.length > 0,
+      )
+    ) {
+      try {
+        currentEmbedding = await generateEmbeddingFromBuffer(currentBuffer, {
+          allowPlaceholder: process.env.ALLOW_PLACEHOLDER_EMBEDDINGS === "1",
+        });
+      } catch (error) {
+        console.warn("[compare] Server embedding reranking unavailable:", error);
+      }
+    }
 
-      geometricResult = await verifier.verify(
-        baselineGray.gray,
-        currentGray.gray,
-        targetWidth,
-        targetHeight,
+    const unresolvedCandidates: VerificationCandidate[] =
+      candidateBaselines.length > 0
+        ? candidateBaselines.map((candidate) => ({
+            id: candidate.id,
+            imageUrl: candidate.imageUrl,
+            verificationImageUrl: candidate.verificationImageUrl,
+            embedding: candidate.embedding,
+          }))
+        : [
+            {
+              id: FALLBACK_CANDIDATE_ID,
+              imageUrl: baselineImage,
+              verificationImageUrl: null,
+              embedding: null,
+            },
+          ];
+
+    if (currentEmbedding) {
+      unresolvedCandidates.sort((a, b) => {
+        const simA =
+          Array.isArray(a.embedding) && a.embedding.length === currentEmbedding.length
+            ? cosineSimilarity(currentEmbedding, a.embedding)
+            : Number.NEGATIVE_INFINITY;
+        const simB =
+          Array.isArray(b.embedding) && b.embedding.length === currentEmbedding.length
+            ? cosineSimilarity(currentEmbedding, b.embedding)
+            : Number.NEGATIVE_INFINITY;
+        a.serverEmbeddingSimilarity = simA;
+        b.serverEmbeddingSimilarity = simB;
+        return simB - simA;
+      });
+    }
+
+    if (userSelectedCandidateId) {
+      const selectedIdx = unresolvedCandidates.findIndex(
+        (candidate) => candidate.id === userSelectedCandidateId,
+      );
+      if (selectedIdx > 0) {
+        const [selected] = unresolvedCandidates.splice(selectedIdx, 1);
+        unresolvedCandidates.unshift(selected);
+      }
+    }
+
+    const preparedCandidates = (
+      await Promise.all(
+        unresolvedCandidates.slice(0, 5).map(async (candidate) => {
+          if (candidate.id === FALLBACK_CANDIDATE_ID) {
+            return {
+              ...candidate,
+              verificationGray: await imageToGrayscale(
+                Buffer.from(baselineData.base64, "base64"),
+              ),
+            };
+          }
+
+          const verificationData = await prepareImageData(
+            candidate.verificationImageUrl || candidate.imageUrl,
+            false,
+          );
+          if (!verificationData) {
+            return null;
+          }
+
+          return {
+            ...candidate,
+            verificationGray: await imageToGrayscale(
+              Buffer.from(verificationData.base64, "base64"),
+            ),
+          };
+        }),
+      )
+    ).filter(
+      (
+        candidate,
+      ): candidate is VerificationCandidate & {
+        verificationGray: NonNullable<VerificationCandidate["verificationGray"]>;
+      } => Boolean(candidate?.verificationGray),
+    );
+
+    if (preparedCandidates.length === 0) {
+      return buildLocalizationFailedResult(null, { candidatesAttempted: 0 });
+    }
+
+    let bestCascade: Awaited<ReturnType<typeof runVerificationCascade>> | null = null;
+    let bestCurrentFrame = currentFrames[0];
+
+    for (const currentFrame of currentFrames) {
+      const cascadeAttempt = await runVerificationCascade(
+        getVerifier(),
+        preparedCandidates.map((candidate) => ({
+          id: candidate.id,
+          gray: candidate.verificationGray.gray,
+          width: candidate.verificationGray.width,
+          height: candidate.verificationGray.height,
+        })),
+        currentFrame.gray.gray,
+        currentFrame.gray.width,
+        currentFrame.gray.height,
       );
 
-      // If geometric verification fails, return localization_failed
-      if (!geometricResult.verified) {
-        return {
-          findings: [],
-          summary: geometricResult.userGuidance,
-          readiness_score: null,
-          diagnostics: {
-            skippedByPreflight: true,
-            preflight: {
-              gateVersion: "preflight-v1" as const,
-              shouldCallAi: false,
-              reason: "alignment_low_confidence" as const,
-              ssim: 0,
-              diffPercent: 0,
-              alignment: { dx: 0, dy: 0, score: 0, maxShift: 0 },
-              thresholds: { ssim: 0, diffPercent: 0, minAlignmentScore: 0 },
-            },
-            model: "geometric-verify",
-            geometricVerification: {
-              verified: geometricResult.verified,
-              inlierCount: geometricResult.inlierCount,
-              inlierRatio: geometricResult.inlierRatio,
-              inlierSpread: geometricResult.inlierSpread,
-              overlapArea: geometricResult.overlapArea,
-              rejectionReasons: geometricResult.rejectionReasons,
-            },
-          },
-        };
+      if (
+        !bestCascade ||
+        scoreVerificationAttempt(cascadeAttempt.verificationResult) >
+          scoreVerificationAttempt(bestCascade.verificationResult)
+      ) {
+        bestCascade = cascadeAttempt;
+        bestCurrentFrame = currentFrame;
       }
-    } catch (geoErr) {
-      // Geometric verification failed — log but continue with preflight gate
-      // Fail-open for now during rollout; will become fail-closed once stable
-      console.warn("[compare] Geometric verification error (falling through):", geoErr);
+
+      if (cascadeAttempt.verifiedCandidateId && cascadeAttempt.verificationResult?.verified) {
+        bestCascade = cascadeAttempt;
+        bestCurrentFrame = currentFrame;
+        break;
+      }
     }
 
-    // Run preflight change-detection gate on baseline vs first current frame.
-    // Purpose is now ONLY "has anything changed?" — not view matching.
+    const cascade =
+      bestCascade ||
+      ({
+        verifiedCandidateId: null,
+        verificationResult: null,
+        candidatesAttempted: 0,
+        allResults: [],
+      } satisfies Awaited<ReturnType<typeof runVerificationCascade>>);
+    const geometricResult = cascade.verificationResult;
+    const verifiedCandidate = cascade.verifiedCandidateId
+      ? preparedCandidates.find((candidate) => candidate.id === cascade.verifiedCandidateId) || null
+      : null;
+
+    if (!verifiedCandidate || !geometricResult?.verified) {
+      return buildLocalizationFailedResult(geometricResult, {
+        verifiedCandidateId: cascade.verifiedCandidateId,
+        candidatesAttempted: cascade.candidatesAttempted,
+        serverEmbeddingSimilarity:
+          preparedCandidates.find((candidate) => candidate.id === cascade.verifiedCandidateId)
+            ?.serverEmbeddingSimilarity,
+      });
+    }
+
+    const verifiedBaselineId =
+      verifiedCandidate.id === FALLBACK_CANDIDATE_ID ? null : verifiedCandidate.id;
+
+    const geometricDiagnostics = {
+      verified: true,
+      verifiedCandidateId: verifiedBaselineId,
+      candidatesAttempted: cascade.candidatesAttempted,
+      serverEmbeddingSimilarity: verifiedCandidate.serverEmbeddingSimilarity,
+      inlierCount: geometricResult.inlierCount,
+      inlierRatio: geometricResult.inlierRatio,
+      inlierSpread: geometricResult.inlierSpread,
+      overlapArea: geometricResult.overlapArea,
+      rejectionReasons: geometricResult.rejectionReasons,
+    };
+
+    let verifiedBaselineData = baselineData;
+    if (verifiedCandidate.id !== FALLBACK_CANDIDATE_ID) {
+      const fetchedVerifiedBaseline = await prepareImageData(
+        verifiedCandidate.imageUrl,
+        false,
+      );
+      if (!fetchedVerifiedBaseline) {
+        return buildComparisonUnavailableResult(
+          "Verified baseline image unavailable.",
+          "Try again in a moment.",
+          {
+            verifiedBaselineId,
+            geometricVerification: geometricDiagnostics,
+          },
+        );
+      }
+      verifiedBaselineData = fetchedVerifiedBaseline;
+    }
+
     const preflight = await runPreflightGate({
-      baselineBase64: baselineData.base64,
-      currentBase64: validCurrentData[0].base64,
+      baselineBase64: verifiedBaselineData.base64,
+      currentBase64: bestCurrentFrame.data.base64,
     });
 
     if (preflight && !preflight.shouldCallAi) {
       return {
+        status: "localized_no_change",
         findings: [],
         summary: "No meaningful visual change detected",
         readiness_score: 100,
+        verifiedBaselineId,
+        userGuidance: "No action needed.",
         diagnostics: {
           skippedByPreflight: true,
           preflight,
           model: "preflight-gate",
+          geometricVerification: geometricDiagnostics,
         },
       };
     }
 
     const anthropicKey = process.env.CLAUDE_API_KEY;
     if (!anthropicKey) {
-      return {
-        ...EMPTY_RESULT,
-        summary: "AI unavailable",
-        diagnostics: {
-          skippedByPreflight: false,
+      return buildComparisonUnavailableResult(
+        "AI unavailable",
+        "AI is unavailable right now. Try again shortly.",
+        {
+          verifiedBaselineId,
           preflight: preflight || undefined,
+          geometricVerification: geometricDiagnostics,
         },
-      };
+      );
     }
 
     // Build message content
@@ -427,8 +747,8 @@ export async function compareImages(
         type: "image",
         source: {
           type: "base64",
-          media_type: baselineData.mediaType,
-          data: baselineData.base64,
+          media_type: verifiedBaselineData.mediaType,
+          data: verifiedBaselineData.base64,
         },
       },
     ];
@@ -478,47 +798,59 @@ export async function compareImages(
     if (!res.ok) {
       const errBody = await res.text().catch(() => "");
       console.error(`[compare] Anthropic API error: ${res.status} ${res.statusText}`, errBody.slice(0, 300));
-      return {
-        ...EMPTY_RESULT,
-        summary: "Comparison unavailable",
-        diagnostics: {
+      return buildComparisonUnavailableResult(
+        "Comparison unavailable",
+        "Try again in a moment.",
+        {
+          verifiedBaselineId,
+          preflight: preflight || undefined,
+          geometricVerification: geometricDiagnostics,
           model: aiModel,
           aiLatencyMs: Date.now() - aiStartedAt,
-          preflight: preflight || undefined,
-          skippedByPreflight: false,
         },
-      };
+      );
     }
 
     const data = await res.json();
     const rawText = data.content?.[0]?.text;
 
     if (!rawText) {
-      return {
-        ...EMPTY_RESULT,
-        summary: "Empty AI response",
-        diagnostics: {
+      return buildComparisonUnavailableResult(
+        "Empty AI response",
+        "Try again in a moment.",
+        {
+          verifiedBaselineId,
+          preflight: preflight || undefined,
+          geometricVerification: geometricDiagnostics,
           model: aiModel,
           aiLatencyMs: Date.now() - aiStartedAt,
-          preflight: preflight || undefined,
-          skippedByPreflight: false,
         },
-      };
+      );
     }
 
     const parsed = parseComparisonResponse(rawText);
     return {
-      ...parsed,
+      status: "localized_changed",
+      findings: parsed.findings,
+      summary: parsed.summary,
+      readiness_score: parsed.readiness_score,
+      verifiedBaselineId,
+      userGuidance:
+        parsed.findings.length > 0 ? "Review the findings." : "Angle captured.",
       diagnostics: {
-        ...(parsed.diagnostics || {}),
         model: aiModel,
         aiLatencyMs: Date.now() - aiStartedAt,
         preflight: preflight || undefined,
         skippedByPreflight: false,
+        geometricVerification: geometricDiagnostics,
       },
     };
-  } catch {
-    return { ...EMPTY_RESULT, summary: "Comparison failed" };
+  } catch (error) {
+    console.error("[compare] Comparison failed:", error);
+    return buildComparisonUnavailableResult(
+      "Comparison failed",
+      "Try again in a moment.",
+    );
   }
 }
 
@@ -526,22 +858,68 @@ export async function compareImages(
  * Parse the AI response text into a ComparisonResult.
  * Handles both clean JSON and JSON embedded in markdown/text.
  */
-function parseComparisonResponse(rawText: string): ComparisonResult {
+function parseComparisonResponse(rawText: string): ParsedAiResponse {
   try {
-    return JSON.parse(rawText);
+    return normalizeParsedAiResponse(JSON.parse(rawText));
   } catch {
     // Try to extract JSON from surrounding text
     const start = rawText.indexOf("{");
     const end = rawText.lastIndexOf("}") + 1;
     if (start !== -1 && end > start) {
       try {
-        return JSON.parse(rawText.substring(start, end));
+        return normalizeParsedAiResponse(JSON.parse(rawText.substring(start, end)));
       } catch {
         // Fall through
       }
     }
-    return { ...EMPTY_RESULT, summary: "Parse error" };
+    return {
+      findings: [],
+      summary: "Parse error",
+      readiness_score: null,
+    };
   }
+}
+
+function normalizeParsedAiResponse(raw: unknown): ParsedAiResponse {
+  if (!raw || typeof raw !== "object") {
+    return {
+      findings: [],
+      summary: "Invalid AI response",
+      readiness_score: null,
+    };
+  }
+
+  const record = raw as Record<string, unknown>;
+  const findings = Array.isArray(record.findings)
+    ? record.findings.filter((finding): finding is ComparisonFinding => {
+        if (!finding || typeof finding !== "object") return false;
+        const candidate = finding as Partial<ComparisonFinding>;
+        return (
+          typeof candidate.description === "string" &&
+          typeof candidate.category === "string" &&
+          typeof candidate.severity === "string" &&
+          typeof candidate.confidence === "number"
+        );
+      })
+    : [];
+
+  return {
+    findings,
+    summary:
+      typeof record.summary === "string" && record.summary.trim()
+        ? record.summary.trim()
+        : findings.length > 0
+          ? "Findings detected"
+          : "No issues detected",
+    readiness_score:
+      typeof record.readiness_score === "number"
+        ? record.readiness_score
+        : record.readiness_score === null
+          ? null
+          : findings.length === 0
+            ? 100
+            : null,
+  };
 }
 
 function stripDataUriPrefix(base64OrDataUri: string): string {

@@ -9,6 +9,7 @@
  * embedding consistency (cosine similarity depends on identical weights).
  */
 
+import { createHash } from "crypto";
 import { existsSync } from "fs";
 import { join } from "path";
 import { fetchImageBuffer } from "./fetch-image";
@@ -20,9 +21,16 @@ export const REAL_EMBEDDING_MODEL_VERSION = "mobileclip-s0-v1";
 export const PLACEHOLDER_EMBEDDING_MODEL_VERSION = "mobileclip-s0-placeholder-v1";
 
 // Singleton state
-let onnxSession: any = null;
+type OnnxSession = {
+  inputNames: string[];
+  outputNames: string[];
+  run: (feeds: Record<string, unknown>) => Promise<Record<string, { data: Float32Array }>>;
+};
+
+let onnxSession: OnnxSession | null = null;
 let onnxLoadAttempted = false;
 let modelAvailable = false;
+let modelLoadPromise: Promise<boolean> | null = null;
 
 export interface GenerateEmbeddingOptions {
   /**
@@ -58,29 +66,39 @@ export async function hasRealEmbeddingModel(): Promise<boolean> {
  * Returns true if model loaded successfully.
  */
 async function ensureModel(): Promise<boolean> {
+  if (modelLoadPromise) return modelLoadPromise;
   if (onnxLoadAttempted) return modelAvailable;
-  onnxLoadAttempted = true;
 
-  if (!existsSync(MODEL_PATH)) {
-    console.warn(
-      `[embeddings] ONNX model not found at ${MODEL_PATH}. Using placeholder embeddings. ` +
-      `See docs/ONNX_MODEL_SETUP.md for model acquisition instructions.`
-    );
-    return false;
-  }
+  modelLoadPromise = (async () => {
+    onnxLoadAttempted = true;
 
-  try {
-    const ort = await import("onnxruntime-node");
-    onnxSession = await ort.InferenceSession.create(MODEL_PATH, {
-      executionProviders: ["cpu"],
-    });
-    modelAvailable = true;
-    console.info("[embeddings] ONNX model loaded successfully");
-    return true;
-  } catch (error) {
-    console.error("[embeddings] Failed to load ONNX model:", error);
-    return false;
-  }
+    if (!existsSync(MODEL_PATH)) {
+      console.warn(
+        `[embeddings] ONNX model not found at ${MODEL_PATH}. Using placeholder embeddings. ` +
+        `See docs/ONNX_MODEL_SETUP.md for model acquisition instructions.`
+      );
+      modelAvailable = false;
+      return false;
+    }
+
+    try {
+      const ort = await import("onnxruntime-node");
+      onnxSession = await ort.InferenceSession.create(MODEL_PATH, {
+        executionProviders: ["cpu"],
+      }) as OnnxSession;
+      modelAvailable = true;
+      console.info("[embeddings] ONNX model loaded successfully");
+      return true;
+    } catch (error) {
+      console.error("[embeddings] Failed to load ONNX model:", error);
+      modelAvailable = false;
+      return false;
+    } finally {
+      modelLoadPromise = null;
+    }
+  })();
+
+  return modelLoadPromise;
 }
 
 /**
@@ -93,6 +111,26 @@ export async function generateEmbedding(imageUrl: string): Promise<number[]> {
   return generateEmbeddingWithOptions(imageUrl);
 }
 
+export async function generateEmbeddingFromBuffer(
+  imageBuffer: Buffer,
+  options: GenerateEmbeddingOptions = {},
+): Promise<number[]> {
+  const hasModel = await ensureModel();
+
+  if (hasModel && onnxSession) {
+    return generateOnnxEmbeddingFromBuffer(imageBuffer, onnxSession);
+  }
+
+  if (options.allowPlaceholder) {
+    const placeholderKey = createHash("sha256").update(imageBuffer).digest("hex");
+    return generatePlaceholderEmbedding(`buffer:${placeholderKey}`);
+  }
+
+  throw new Error(
+    "Embedding model unavailable. Provision MobileCLIP ONNX model or enable ALLOW_PLACEHOLDER_EMBEDDINGS=1 for local development only.",
+  );
+}
+
 export async function generateEmbeddingWithOptions(
   imageUrl: string,
   options: GenerateEmbeddingOptions = {},
@@ -100,7 +138,7 @@ export async function generateEmbeddingWithOptions(
   const hasModel = await ensureModel();
 
   if (hasModel && onnxSession) {
-    return generateOnnxEmbedding(imageUrl);
+    return generateOnnxEmbedding(imageUrl, onnxSession);
   }
 
   if (options.allowPlaceholder) {
@@ -115,20 +153,40 @@ export async function generateEmbeddingWithOptions(
 /**
  * Generate embedding via ONNX Runtime inference.
  */
-async function generateOnnxEmbedding(imageUrl: string): Promise<number[]> {
+async function generateOnnxEmbedding(
+  imageUrl: string,
+  session: OnnxSession,
+): Promise<number[]> {
   try {
-    const ort = await import("onnxruntime-node");
-
     // Fetch and preprocess image
     const imageBuffer = await fetchImageBuffer(imageUrl);
     if (!imageBuffer) {
       throw new Error("Failed to fetch image bytes");
     }
 
+    return generateOnnxEmbeddingFromBuffer(imageBuffer, session, imageUrl);
+  } catch (error) {
+    console.error("[embeddings] ONNX inference failed:", error);
+    throw new Error(
+      `ONNX inference failed for image: ${imageUrl.slice(0, 160)}`,
+      { cause: error as Error },
+    );
+  }
+}
+
+async function generateOnnxEmbeddingFromBuffer(
+  imageBuffer: Buffer,
+  session: OnnxSession,
+  sourceLabel: string = "buffer",
+): Promise<number[]> {
+  try {
+    const ort = await import("onnxruntime-node");
+
     const sharp = (await import("sharp")).default;
 
     // Resize to 256x256 and get raw RGB pixel data
     const { data } = await sharp(imageBuffer)
+      .rotate()
       .resize(IMAGE_SIZE, IMAGE_SIZE, { fit: "cover" })
       .removeAlpha()
       .raw()
@@ -157,12 +215,12 @@ async function generateOnnxEmbedding(imageUrl: string): Promise<number[]> {
     ]);
 
     // Run inference
-    const feeds: Record<string, any> = {};
-    const inputName = onnxSession.inputNames[0];
+    const feeds: Record<string, unknown> = {};
+    const inputName = session.inputNames[0];
     feeds[inputName] = inputTensor;
 
-    const results = await onnxSession.run(feeds);
-    const outputName = onnxSession.outputNames[0];
+    const results = await session.run(feeds);
+    const outputName = session.outputNames[0];
     const outputData = results[outputName].data as Float32Array;
 
     // L2 normalize the embedding
@@ -171,7 +229,7 @@ async function generateOnnxEmbedding(imageUrl: string): Promise<number[]> {
   } catch (error) {
     console.error("[embeddings] ONNX inference failed:", error);
     throw new Error(
-      `ONNX inference failed for image: ${imageUrl.slice(0, 160)}`,
+      `ONNX inference failed for image: ${sourceLabel.slice(0, 160)}`,
       { cause: error as Error },
     );
   }

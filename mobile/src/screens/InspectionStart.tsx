@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useRef } from "react";
 import {
   View,
   Text,
@@ -66,8 +66,11 @@ export default function InspectionStartScreen() {
   const [selectedSource, setSelectedSource] = useState<ImageSourceType>("camera");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const startingRef = useRef(false);
 
   const handleStart = async () => {
+    if (startingRef.current) return;
+    startingRef.current = true;
     setLoading(true);
     setError(null);
 
@@ -81,7 +84,9 @@ export default function InspectionStartScreen() {
       });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to start inspection");
+    } finally {
       setLoading(false);
+      startingRef.current = false;
     }
   };
 

@@ -49,10 +49,11 @@ interface GrayFrame {
 export async function runPreflightGate(
   options: GateOptions,
 ): Promise<PreflightGateResult | null> {
-  let sharp: any;
+  let sharp: ((input?: Buffer | Uint8Array | string) => any);
   try {
     sharp = (await import("sharp")).default;
-  } catch {
+  } catch (error) {
+    console.warn("[preflight-gate] sharp unavailable, skipping preflight gate", error);
     return null;
   }
 

@@ -323,8 +323,12 @@ export default function InspectionSummaryScreen() {
             text: "Delete",
             style: "destructive",
             onPress: async () => {
-              const previous = data;
-              setData((current) => removeFindingFromSummary(current, finding.id));
+              // Capture the pre-delete snapshot via functional setter
+              let previous: SummaryData | null = null;
+              setData((current) => {
+                previous = current;
+                return removeFindingFromSummary(current, finding.id);
+              });
               setDeletingId(finding.id);
               try {
                 if (finding.resultId) {
@@ -335,7 +339,7 @@ export default function InspectionSummaryScreen() {
                   });
                 }
               } catch (err) {
-                setData(previous);
+                if (previous) setData(previous);
                 Alert.alert(
                   "Delete failed",
                   err instanceof Error ? err.message : "Failed to delete note",
@@ -348,7 +352,7 @@ export default function InspectionSummaryScreen() {
         ],
       );
     },
-    [data, inspectionId],
+    [inspectionId],
   );
 
   // Group confirmed findings by severity
@@ -390,13 +394,35 @@ export default function InspectionSummaryScreen() {
         <View style={styles.loadingState}>
           <Text style={styles.errorTitle}>Unable to load inspection details</Text>
           <Text style={styles.errorBody}>{error}</Text>
-          <TouchableOpacity
-            style={styles.completeButton}
-            onPress={() => navigation.goBack()}
-            activeOpacity={0.8}
-          >
-            <Text style={styles.completeButtonText}>Back</Text>
-          </TouchableOpacity>
+          <View style={{ flexDirection: "row", gap: 12, marginTop: 4 }}>
+            <TouchableOpacity
+              style={[styles.completeButton, { flex: 1, backgroundColor: colors.primary }]}
+              onPress={() => {
+                setError(null);
+                setLoading(true);
+                void (async () => {
+                  try {
+                    const payload = await getInspection(inspectionId);
+                    setData(mapInspectionToSummary(payload));
+                  } catch (err) {
+                    setError(err instanceof Error ? err.message : "Failed to load inspection details");
+                  } finally {
+                    setLoading(false);
+                  }
+                })();
+              }}
+              activeOpacity={0.8}
+            >
+              <Text style={styles.completeButtonText}>Retry</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.completeButton, { flex: 1 }]}
+              onPress={() => navigation.goBack()}
+              activeOpacity={0.8}
+            >
+              <Text style={styles.completeButtonText}>Back</Text>
+            </TouchableOpacity>
+          </View>
         </View>
       </SafeAreaView>
     );
@@ -435,7 +461,9 @@ export default function InspectionSummaryScreen() {
                   : data.overallScore >= 50
                     ? "Needs attention"
                     : "Significant issues found"
-              : "No comparisons run"}
+              : data.rooms.length > 0
+                ? "No verified views captured"
+                : "No comparisons run"}
           </Text>
           {/* Score bar */}
           {data.overallScore !== null && (

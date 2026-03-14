@@ -41,6 +41,11 @@ export class MotionFilter {
    * Start monitoring device motion sensors.
    */
   async start() {
+    // Prevent double-subscribe if start() called without stop()
+    if (this.gyroSub || this.accelSub) {
+      this.stop();
+    }
+
     Gyroscope.setUpdateInterval(this.config.updateInterval);
     Accelerometer.setUpdateInterval(this.config.updateInterval);
 

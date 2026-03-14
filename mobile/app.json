@@ -55,7 +55,8 @@
       ],
       "expo-sensors",
       "onnxruntime-react-native",
-      "react-native-ble-plx"
+      "react-native-ble-plx",
+      "expo-font"
     ],
     "extra": {
       "eas": {

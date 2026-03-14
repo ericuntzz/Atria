@@ -4,6 +4,7 @@ import { db } from "@/server/db";
 import { properties } from "@/server/schema";
 import { eq, and, inArray } from "drizzle-orm";
 import { emitEventSafe } from "@/lib/events/emit";
+import { deleteOwnedPropertyGraph } from "@/lib/properties/delete-property-graph";
 
 const MAX_BULK_DELETE = 50;
 
@@ -59,12 +60,10 @@ export async function DELETE(request: NextRequest) {
       return NextResponse.json({ error: "Not found" }, { status: 404 });
     }
 
-    const confirmedIds = userProperties.map((p) => p.id);
-
-    // Delete all confirmed properties (cascade handles related data)
-    await db
-      .delete(properties)
-      .where(inArray(properties.id, confirmedIds));
+    const confirmedIds = await deleteOwnedPropertyGraph(
+      dbUser.id,
+      userProperties.map((p) => p.id),
+    );
 
     // Emit audit events (non-blocking)
     for (const prop of userProperties) {
@@ -90,7 +89,12 @@ export async function DELETE(request: NextRequest) {
   } catch (error) {
     console.error("[properties/bulk] DELETE error:", error);
     return NextResponse.json(
-      { error: "Internal server error" },
+      {
+        error:
+          process.env.NODE_ENV === "development" && error instanceof Error
+            ? error.message
+            : "Internal server error",
+      },
       { status: 500 },
     );
   }

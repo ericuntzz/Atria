@@ -42,9 +42,16 @@ export interface ComparisonDiagnostics {
 }
 
 export interface ComparisonResult {
+  status:
+    | "localized_changed"
+    | "localized_no_change"
+    | "localization_failed"
+    | "comparison_unavailable";
   findings: ComparisonFinding[];
   summary: string;
   readiness_score: number | null;
+  verifiedBaselineId: string | null;
+  userGuidance: string;
   diagnostics?: ComparisonDiagnostics;
 }
 
@@ -55,12 +62,15 @@ export interface ComparisonManagerConfig {
   maxConcurrent: number;
   /** Burst capture delay between frames in ms (default 500) */
   burstDelayMs: number;
+  /** Minimum interval between explicit manual captures in ms (default 1200) */
+  manualMinIntervalMs: number;
 }
 
 const DEFAULT_CONFIG: ComparisonManagerConfig = {
-  minIntervalMs: 3000,
+  minIntervalMs: 1800,
   maxConcurrent: 1,
   burstDelayMs: 500,
+  manualMinIntervalMs: 900,
 };
 
 export type ComparisonTriggerSource = "auto" | "manual";
@@ -169,6 +179,18 @@ export class ComparisonManager {
   }
 
   /**
+   * Manual capture is user intent, so it skips change-detection gating.
+   * We still prevent overlap and a very tight tap-spam loop.
+   */
+  canTriggerManual(): boolean {
+    if (this.paused) return false;
+    if (this.activeComparisons >= this.config.maxConcurrent) return false;
+
+    const elapsed = Date.now() - this.lastComparisonTime;
+    return elapsed >= this.config.manualMinIntervalMs;
+  }
+
+  /**
    * Get the changed quadrants from the last change detection.
    * Used for dynamic tiling — only send changed regions.
    */
@@ -211,6 +233,10 @@ export class ComparisonManager {
       clientSimilarity?: number;
       /** Baseline IDs for server to resolve and verify (top-k candidates) */
       topCandidateIds?: string[];
+      /** User-selected target hint — server still verifies independently */
+      userSelectedCandidateId?: string;
+      /** Token refresh function — called on 401 to get a fresh token */
+      refreshToken?: () => Promise<string | null>;
     },
     cropFrame?: CropFrameFn,
   ) {
@@ -245,26 +271,73 @@ export class ComparisonManager {
         }
       }
 
-      // POST to SSE endpoint
-      const res = await fetch(`${options.apiUrl}/api/vision/compare-stream`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${options.authToken}`,
-        },
-        body: JSON.stringify({
-          baselineUrl,
-          currentImages: imagesToSend,
-          roomName,
-          inspectionMode: options.inspectionMode || "turnover",
-          knownConditions: options.knownConditions || [],
-          inspectionId: options.inspectionId,
-          roomId,
-          baselineImageId: options.baselineImageId,
-          clientSimilarity: options.clientSimilarity,
-          topCandidateIds: options.topCandidateIds,
-        }),
-      });
+      // POST to SSE endpoint with timeout and 401 refresh
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 90_000); // 90s timeout
+
+      let authToken = options.authToken;
+      let res: Response;
+
+      try {
+        res = await fetch(`${options.apiUrl}/api/vision/compare-stream`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${authToken}`,
+          },
+          body: JSON.stringify({
+            baselineUrl,
+            currentImages: imagesToSend,
+            roomName,
+            inspectionMode: options.inspectionMode || "turnover",
+            knownConditions: options.knownConditions || [],
+            inspectionId: options.inspectionId,
+            roomId,
+            baselineImageId: options.baselineImageId,
+            clientSimilarity: options.clientSimilarity,
+            topCandidateIds: options.topCandidateIds,
+            userSelectedCandidateId: options.userSelectedCandidateId,
+          }),
+          signal: controller.signal,
+        });
+      } finally {
+        clearTimeout(timeoutId);
+      }
+
+      // 401: attempt token refresh and retry once
+      if (res.status === 401 && options.refreshToken) {
+        const refreshedToken = await options.refreshToken();
+        if (refreshedToken) {
+          authToken = refreshedToken;
+          const retryController = new AbortController();
+          const retryTimeout = setTimeout(() => retryController.abort(), 90_000);
+          try {
+            res = await fetch(`${options.apiUrl}/api/vision/compare-stream`, {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                Authorization: `Bearer ${authToken}`,
+              },
+              body: JSON.stringify({
+                baselineUrl,
+                currentImages: imagesToSend,
+                roomName,
+                inspectionMode: options.inspectionMode || "turnover",
+                knownConditions: options.knownConditions || [],
+                inspectionId: options.inspectionId,
+                roomId,
+                baselineImageId: options.baselineImageId,
+                clientSimilarity: options.clientSimilarity,
+                topCandidateIds: options.topCandidateIds,
+                userSelectedCandidateId: options.userSelectedCandidateId,
+              }),
+              signal: retryController.signal,
+            });
+          } finally {
+            clearTimeout(retryTimeout);
+          }
+        }
+      }
 
       if (!res.ok) {
         this.consecutiveFailures++;
@@ -278,10 +351,14 @@ export class ComparisonManager {
       let receivedResult = false;
       for (const event of sseEvents) {
         const typeMatch = event.match(/^event: (\w+)/m);
-        const dataMatch = event.match(/^data: (.+)$/m);
-        if (typeMatch?.[1] === "result" && dataMatch?.[1]) {
+        // Join all `data:` lines per SSE spec (multiple data lines are concatenated with \n)
+        const dataLines = event.match(/^data: (.+)$/gm);
+        const dataPayload = dataLines
+          ? dataLines.map((line) => line.slice(6)).join("\n")
+          : null;
+        if (typeMatch?.[1] === "result" && dataPayload) {
           try {
-            const result: ComparisonResult = JSON.parse(dataMatch[1]);
+            const result: ComparisonResult = JSON.parse(dataPayload);
             receivedResult = true;
             this.onFinding?.(result, {
               roomId,

@@ -64,15 +64,18 @@ export interface RoomDetectorConfig {
   crossRoomFallbackThreshold: number;
   /** Similarity gap within which coverage breaks ties (default 0.03) */
   coverageTieBreakGap: number;
+  /** Similarity gap within which a locked baseline stays sticky to avoid flicker */
+  lockStickinessGap: number;
 }
 
 const DEFAULT_CONFIG: RoomDetectorConfig = {
-  roomThreshold: 0.85,
+  roomThreshold: 0.62,
   angleThreshold: 0.85,
-  hysteresisFrames: 5,
-  baselineLockFrames: 3,
-  crossRoomFallbackThreshold: 0.90,
+  hysteresisFrames: 3,
+  baselineLockFrames: 2,
+  crossRoomFallbackThreshold: 0.68,
   coverageTieBreakGap: 0.03,
+  lockStickinessGap: 0.04,
 };
 
 /**
@@ -115,8 +118,8 @@ export class RoomDetector {
 
   // Adaptive rate tracking
   private consecutiveConfidentFrames = 0;
-  private readonly CONFIDENT_THRESHOLD = 0.99;
-  private readonly SLOWDOWN_AFTER_FRAMES = 90; // ~30s at 3fps
+  private readonly CONFIDENT_THRESHOLD = 0.7;
+  private readonly SLOWDOWN_AFTER_FRAMES = 40; // ~20s at 2fps
 
   constructor(config?: Partial<RoomDetectorConfig>) {
     this.config = { ...DEFAULT_CONFIG, ...config };
@@ -160,9 +163,9 @@ export class RoomDetector {
    */
   getRecommendedInterval(): number {
     if (this.consecutiveConfidentFrames >= this.SLOWDOWN_AFTER_FRAMES) {
-      return 1000; // 1fps
+      return 900; // ~1fps when confidently locked
     }
-    return 333; // 3fps
+    return 500; // 2fps keeps guidance smooth without over-capturing
   }
 
   /**
@@ -366,6 +369,18 @@ export class RoomDetector {
         if (firstScanned && !secondScanned) {
           topCandidate = candidates[1];
         }
+      }
+    }
+
+    if (this.lockedBaseline?.isLocked) {
+      const lockedCandidate = candidates.find(
+        (candidate) => candidate.baseline.id === this.lockedBaseline?.baseline.id,
+      );
+      const gapToLocked = lockedCandidate
+        ? candidates[0].similarity - lockedCandidate.similarity
+        : Number.POSITIVE_INFINITY;
+      if (lockedCandidate && gapToLocked <= this.config.lockStickinessGap) {
+        topCandidate = lockedCandidate;
       }
     }
 

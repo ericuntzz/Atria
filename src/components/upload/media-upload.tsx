@@ -2,7 +2,7 @@
 
 import { useState, useRef, useCallback, useEffect } from "react";
 import { Button } from "@/components/ui/button";
-import { Upload, X, Image, Video, Loader2, CheckCircle } from "lucide-react";
+import { Upload, X, Image as ImageIcon, Video, Loader2, CheckCircle } from "lucide-react";
 
 interface MediaUploadProps {
   propertyId: string;
@@ -279,7 +279,7 @@ export function MediaUpload({
                   ) : f.file.type.startsWith("video/") ? (
                     <Video className="h-8 w-8 text-muted-foreground" />
                   ) : (
-                    <Image className="h-8 w-8 text-muted-foreground" />
+                    <ImageIcon aria-hidden="true" className="h-8 w-8 text-muted-foreground" />
                   )}
 
                   {/* Status overlay */}

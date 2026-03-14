@@ -108,6 +108,13 @@ export default function ReportIssueScreen() {
           <Text style={styles.successSubtitle}>
             Thanks for letting us know. We will look into this.
           </Text>
+          <TouchableOpacity
+            style={[styles.submitButton, { marginTop: 24, paddingHorizontal: 40 }]}
+            onPress={() => navigation.goBack()}
+            activeOpacity={0.8}
+          >
+            <Text style={styles.submitButtonText}>Done</Text>
+          </TouchableOpacity>
         </View>
       </SafeAreaView>
     );

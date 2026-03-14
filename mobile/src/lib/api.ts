@@ -1,4 +1,5 @@
 import { Platform } from "react-native";
+import * as FileSystem from "expo-file-system";
 import { supabase } from "./supabase";
 
 const API_BASE = process.env.EXPO_PUBLIC_API_URL ?? "";
@@ -34,6 +35,14 @@ export class ApiError extends Error {
   }
 }
 
+async function signOutExpiredSession() {
+  try {
+    await supabase.auth.signOut({ scope: "local" });
+  } catch {
+    // Ignore sign-out cleanup failures; caller will still surface the auth error.
+  }
+}
+
 /**
  * Fetch with a timeout using AbortController.
  */
@@ -63,7 +72,8 @@ async function authFetch(path: string, options: FetchOptions = {}) {
   } = await supabase.auth.getSession();
 
   if (!session?.access_token) {
-    throw new Error("Not authenticated");
+    await signOutExpiredSession();
+    throw new ApiError(401, "Session expired. Please sign in again.");
   }
 
   const { json, timeoutMs = REQUEST_TIMEOUT_MS, noRetry, ...fetchOptions } = options;
@@ -91,12 +101,17 @@ async function authFetch(path: string, options: FetchOptions = {}) {
           headers.Authorization = `Bearer ${refreshData.session.access_token}`;
           continue; // Retry with new token
         }
+        await signOutExpiredSession();
         throw new ApiError(401, "Session expired. Please sign in again.");
       }
 
       if (!res.ok) {
         const error = await res.json().catch(() => ({ error: `${res.status} ${res.statusText}` }));
         const apiError = new ApiError(res.status, error.error || error.message || `Request failed (${res.status})`);
+
+        if (res.status === 401) {
+          await signOutExpiredSession();
+        }
 
         // Retry on 5xx server errors (not on 4xx client errors)
         if (res.status >= 500 && attempt < maxAttempts) {
@@ -152,8 +167,11 @@ function delay(ms: number) {
 }
 
 function withPhoneDevHint(baseMessage: string): string {
-  if (__DEV__ && LOCALHOST_API_PATTERN.test(API_BASE)) {
-    return `${baseMessage} API URL is ${API_BASE}. On a physical phone, localhost points to the phone itself. Run "npm run dev:phone" or set EXPO_PUBLIC_API_URL to your Mac LAN IP.`;
+  if (__DEV__) {
+    const localhostHint = LOCALHOST_API_PATTERN.test(API_BASE)
+      ? ' On a physical phone, localhost points to the phone itself. Run "npm run dev:phone" or set EXPO_PUBLIC_API_URL to your Mac LAN IP.'
+      : "";
+    return `${baseMessage} API URL is ${API_BASE}. Health check: ${API_BASE}/api/health.${localhostHint}`;
   }
 
   return `${baseMessage} Verify the API server is running and reachable from your phone.`;
@@ -463,80 +481,41 @@ export async function uploadImageFile(
   fileName?: string,
 ) {
   const resolvedName = fileName || `training-keyframe-${Date.now()}.jpg`;
-  const maxAttempts = MAX_RETRIES + 1;
-
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    const { data: { session } } = await supabase.auth.getSession();
-    if (!session?.access_token) {
-      throw new ApiError(0, "Not authenticated");
+  try {
+    // Read the local thumbnail directly from Expo's file API to avoid
+    // 0-byte uploads that can happen when piping file:// URIs through fetch().
+    const file = new FileSystem.File(imageUri);
+    if (!file.exists || file.size === 0) {
+      throw new ApiError(0, "Unable to read keyframe image from device storage");
     }
 
-    try {
-      const localFileRes = await fetchWithTimeout(imageUri, {}, 60_000);
-      if (!localFileRes.ok) {
-        throw new ApiError(0, "Unable to read keyframe image from device storage");
-      }
-      const rawBlob = await localFileRes.blob();
-      // Ensure MIME type is set — local file:// fetches may produce empty type
-      const fileBlob =
-        rawBlob.type && rawBlob.type.startsWith("image/")
-          ? rawBlob
-          : new Blob([rawBlob], { type: "image/jpeg" });
+    const base64 = await file.base64();
 
-      const formData = new FormData();
-      formData.append("propertyId", propertyId);
-      formData.append("file", fileBlob, resolvedName);
+    if (!base64) {
+      throw new ApiError(0, "Unable to read keyframe image from device storage");
+    }
 
-      const res = await fetchWithTimeout(
-        `${API_BASE}/api/upload`,
-        {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${session.access_token}`,
-          },
-          body: formData,
-        },
-        120_000,
-      );
-
-      if (!res.ok) {
-        const error = await res.json().catch(() => ({
-          error: `${res.status} ${res.statusText}`,
-        }));
-        const apiError = new ApiError(
-          res.status,
-          error.error || error.message || `Upload failed (${res.status})`,
-        );
-
-        if (res.status >= 500 && attempt < maxAttempts) {
-          await delay(attempt * 1000);
-          continue;
-        }
-
-        throw apiError;
-      }
-
-      return res.json();
-    } catch (err) {
-      if (err instanceof ApiError) throw err;
-      if (attempt < maxAttempts) {
-        await delay(attempt * 1000);
-        continue;
-      }
-      const msg = (err as Error).name === "AbortError"
+    return uploadBase64Image(
+      `data:image/jpeg;base64,${base64}`,
+      propertyId,
+      resolvedName,
+    );
+  } catch (err) {
+    const msg = err instanceof ApiError
+      ? err.message
+      : (err as Error).name === "AbortError"
         ? "Keyframe upload timed out"
-        : "Network error during keyframe upload";
-      reportError({
-        errorMessage: msg,
-        httpStatus: 0,
-        action: "POST /api/upload (keyframe)",
-        isAutomatic: true,
-      });
-      throw new ApiError(0, `${msg}. Check your connection.`);
-    }
+        : "Unable to read and upload keyframe image";
+    reportError({
+      errorMessage: msg,
+      httpStatus: 0,
+      action: "POST /api/upload (keyframe)",
+      isAutomatic: true,
+    });
+    throw err instanceof ApiError
+      ? err
+      : new ApiError(0, `${msg}. Check your connection.`);
   }
-
-  throw new ApiError(0, "Keyframe upload failed after retries");
 }
 
 interface SignedVideoUploadSession {
@@ -610,22 +589,17 @@ export async function uploadVideoFile(
     }
 
     try {
-      const localFileRes = await fetchWithTimeout(
-        videoUri,
-        {},
-        120_000,
-      );
-      if (!localFileRes.ok) {
+      const videoFile = new FileSystem.File(videoUri);
+      if (!videoFile.exists || videoFile.size === 0) {
         throw new ApiError(0, "Unable to read captured video from device storage");
       }
-      const fileBlob = await localFileRes.blob();
-      const contentType = fileBlob.type || "video/mp4";
+      const contentType = videoFile.type || "video/mp4";
 
       const signed = await createSignedVideoUploadSession(
         propertyId,
         resolvedName,
         contentType,
-        fileBlob.size,
+        videoFile.size,
       );
 
       const { error: signedUploadError } = await supabase.storage
@@ -633,7 +607,7 @@ export async function uploadVideoFile(
         .uploadToSignedUrl(
           signed.storagePath,
           signed.token,
-          fileBlob as unknown as Blob,
+          videoFile as unknown as Blob,
           {
             contentType,
             upsert: false,
@@ -666,7 +640,7 @@ export async function uploadVideoFile(
         signed.storagePath,
         resolvedName,
         contentType,
-        fileBlob.size,
+        videoFile.size,
       );
     } catch (err) {
       if (err instanceof ApiError) throw err;

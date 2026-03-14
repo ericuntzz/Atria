@@ -131,9 +131,9 @@ export default function PropertyDetailScreen() {
         state: state.trim() || null,
         zipCode: zipCode.trim() || null,
         propertyType: propertyType || null,
-        bedrooms: bedrooms ? parseInt(bedrooms, 10) : null,
-        bathrooms: bathrooms ? parseInt(bathrooms, 10) : null,
-        squareFeet: squareFeet ? parseInt(squareFeet, 10) : null,
+        bedrooms: bedrooms ? (Number.isNaN(parseInt(bedrooms, 10)) ? null : parseInt(bedrooms, 10)) : null,
+        bathrooms: bathrooms ? (Number.isNaN(parseInt(bathrooms, 10)) ? null : parseInt(bathrooms, 10)) : null,
+        squareFeet: squareFeet ? (Number.isNaN(parseInt(squareFeet, 10)) ? null : parseInt(squareFeet, 10)) : null,
         estimatedValue: estimatedValue.trim() || null,
         notes: notes.trim() || null,
       });
@@ -168,6 +168,7 @@ export default function PropertyDetailScreen() {
                   ? err.message
                   : "Failed to delete property",
               );
+            } finally {
               setDeleting(false);
             }
           },
@@ -203,13 +204,36 @@ export default function PropertyDetailScreen() {
     );
   }
 
+  if (error && !name) {
+    return (
+      <SafeAreaView style={styles.container} edges={["top"]}>
+        <View style={styles.header}>
+          <TouchableOpacity style={styles.backButton} onPress={() => navigation.goBack()} activeOpacity={0.7}>
+            <Text style={styles.backText}>{"\u2039"} Back</Text>
+          </TouchableOpacity>
+        </View>
+        <View style={[styles.center, { paddingHorizontal: 24, gap: 12 }]}>
+          <Text style={{ color: colors.heading, fontSize: 18, fontWeight: "600" }}>Unable to load property</Text>
+          <Text style={{ color: colors.muted, fontSize: 14, textAlign: "center" }}>{error}</Text>
+          <TouchableOpacity
+            style={{ backgroundColor: colors.primary, borderRadius: 12, paddingHorizontal: 24, paddingVertical: 12, marginTop: 8 }}
+            onPress={() => { setLoading(true); loadProperty(); }}
+            activeOpacity={0.8}
+          >
+            <Text style={{ color: colors.primaryForeground, fontSize: 16, fontWeight: "600" }}>Retry</Text>
+          </TouchableOpacity>
+        </View>
+      </SafeAreaView>
+    );
+  }
+
   const isTrained = trainingStatus === "trained";
 
   return (
     <SafeAreaView style={styles.container} edges={["top"]}>
       <KeyboardAvoidingView
         style={{ flex: 1 }}
-        behavior={Platform.OS === "ios" ? "padding" : "padding"}
+        behavior={Platform.OS === "ios" ? "padding" : "height"}
         keyboardVerticalOffset={0}
       >
         {/* Header */}

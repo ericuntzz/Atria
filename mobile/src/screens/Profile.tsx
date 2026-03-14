@@ -18,17 +18,16 @@ type Nav = NativeStackNavigationProp<RootStackParamList, "Profile">;
 
 export default function ProfileScreen() {
   const navigation = useNavigation<Nav>();
-  const [email, setEmail] = useState<string>("");
+  const [email, setEmail] = useState<string | null>(null);
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
-      if (session?.user?.email) {
-        setEmail(session.user.email);
-      }
+      setEmail(session?.user?.email || "");
     });
   }, []);
 
-  const initial = email ? email[0].toUpperCase() : "U";
+  const resolvedEmail = email ?? "";
+  const initial = resolvedEmail ? resolvedEmail[0].toUpperCase() : "U";
 
   const handleSignOut = () => {
     Alert.alert("Sign Out", "Are you sure you want to sign out?", [
@@ -39,7 +38,8 @@ export default function ProfileScreen() {
         onPress: async () => {
           try {
             await supabase.auth.signOut();
-          } catch {
+          } catch (err) {
+            console.error("Sign out failed:", err);
             Alert.alert("Error", "Failed to sign out. Please try again.");
           }
         },
@@ -68,7 +68,7 @@ export default function ProfileScreen() {
           <View style={styles.avatar}>
             <Text style={styles.avatarText}>{initial}</Text>
           </View>
-          <Text style={styles.email}>{email}</Text>
+          <Text style={styles.email}>{email === null ? "Loading..." : resolvedEmail}</Text>
         </View>
 
         {/* Menu Items */}

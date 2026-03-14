@@ -1,7 +1,8 @@
-import React, { useCallback, useState } from "react";
+import React, { useCallback, useRef, useState } from "react";
 import {
   ActivityIndicator,
   FlatList,
+  RefreshControl,
   StyleSheet,
   Text,
   TouchableOpacity,
@@ -49,13 +50,15 @@ export default function InspectionHistoryScreen() {
   const { propertyId, propertyName } = route.params;
 
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [items, setItems] = useState<InspectionItem[]>([]);
   const [error, setError] = useState<string | null>(null);
 
-  const loadHistory = useCallback(async () => {
+  const loadHistory = useCallback(async (isBackgroundRefresh = false) => {
     try {
       setError(null);
-      setLoading(true);
+      // Only show full-screen spinner on initial load, not on re-focus
+      if (!isBackgroundRefresh) setLoading(true);
       const inspections: InspectionItem[] = await getInspections({
         propertyId,
         limit: 50,
@@ -65,12 +68,18 @@ export default function InspectionHistoryScreen() {
       setError(err instanceof Error ? err.message : "Failed to load inspection history");
     } finally {
       setLoading(false);
+      setRefreshing(false);
     }
   }, [propertyId]);
 
+  const hasLoadedOnce = useRef(false);
+
   useFocusEffect(
     useCallback(() => {
-      void loadHistory();
+      // First mount: full-screen spinner. Re-focus: silent background refresh.
+      const isBackground = hasLoadedOnce.current;
+      hasLoadedOnce.current = true;
+      void loadHistory(isBackground);
     }, [loadHistory]),
   );
 
@@ -114,6 +123,13 @@ export default function InspectionHistoryScreen() {
           data={items}
           keyExtractor={(item) => item.id}
           contentContainerStyle={styles.list}
+          refreshControl={
+            <RefreshControl
+              refreshing={refreshing}
+              onRefresh={() => { setRefreshing(true); void loadHistory(); }}
+              tintColor={colors.primary}
+            />
+          }
           renderItem={({ item }) => {
             const scoreLabel =
               typeof item.readinessScore === "number"
