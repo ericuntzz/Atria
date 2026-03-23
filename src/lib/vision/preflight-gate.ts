@@ -184,6 +184,9 @@ async function decodeToGray(
   if (!bytes) return null;
 
   const { data, info } = await sharp(bytes)
+    // Keep orientation handling consistent with geometric verification
+    // and derived baseline assets generated during training.
+    .rotate()
     .resize(size, size, { fit: "cover" })
     .grayscale()
     .raw()

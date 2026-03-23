@@ -61,6 +61,25 @@ export interface ComparisonResult {
 
 export type InspectionMode = "turnover" | "maintenance" | "owner_arrival" | "vacancy_check";
 
+/**
+ * Outcome of the fast geometric verification phase.
+ * Emitted as a `verified` SSE event so the client can grant coverage credit early.
+ */
+export interface GeometryOutcome {
+  verified: boolean;
+  verifiedCandidateId: string | null;
+  verificationMode: "geometric" | "user_confirmed_bypass";
+  diagnostics: NonNullable<ComparisonResult["diagnostics"]>["geometricVerification"];
+  /** Internal: prepared data for the AI phase (not serialized to client) */
+  _prepared?: {
+    verifiedBaselineData: PreparedImageData;
+    bestCurrentFrame: PreparedCurrentFrame;
+    validCurrentData: PreparedImageData[];
+    verifiedBaselineId: string | null;
+    effectiveCandidate: VerificationCandidate;
+  };
+}
+
 export interface CompareImagesOptions {
   /** Baseline image — either a URL or base64 string */
   baselineImage: string;
@@ -87,6 +106,10 @@ export interface CompareImagesOptions {
   clientSimilarity?: number;
   /** User-selected candidate hint from the client — never bypasses verification */
   userSelectedCandidateId?: string;
+  /** When true, user explicitly confirmed this baseline via target-assist tap.
+   *  Relaxes geometric verification: proceeds to AI even if verification fails,
+   *  using the best-scoring candidate instead of requiring full geometric match. */
+  userConfirmed?: boolean;
   /** Scoped baseline candidates resolved by the API route for server reranking */
   candidateBaselines?: Array<{
     id: string;
@@ -432,112 +455,108 @@ function buildComparisonUnavailableResult(
 }
 
 /**
- * Compare baseline and current images using Claude Vision API.
- *
- * This is the core comparison engine used by both the inspection API
- * and the SSE streaming endpoint. Accepts either URLs or base64 images.
+ * Phase 1: Fast geometric verification (~500ms-2s).
+ * Prepares images, runs embedding reranking, and geometric verification cascade.
+ * Returns a GeometryOutcome that can be emitted as an early SSE event.
  */
-export async function compareImages(
+export async function verifyGeometry(
   options: CompareImagesOptions,
-): Promise<ComparisonResult> {
+): Promise<GeometryOutcome> {
   const {
     baselineImage,
     currentImages,
-    roomName,
-    inspectionMode = "turnover",
-    knownConditions = [],
     isBase64 = false,
     baselineIsBase64,
     currentImagesAreBase64,
     candidateBaselines = [],
     userSelectedCandidateId,
+    userConfirmed = false,
   } = options;
   const baselineInputIsBase64 = baselineIsBase64 ?? isBase64;
   const currentInputAreBase64 = currentImagesAreBase64 ?? isBase64;
 
-  try {
-    const baselineData = await prepareImageData(baselineImage, baselineInputIsBase64);
-    if (!baselineData) {
-      return buildComparisonUnavailableResult(
-        "Failed to load the reference image.",
-        "Try again in a moment.",
-      );
+  const baselineData = await prepareImageData(baselineImage, baselineInputIsBase64);
+  if (!baselineData) {
+    return {
+      verified: false,
+      verifiedCandidateId: null,
+      verificationMode: "geometric",
+      diagnostics: undefined,
+    };
+  }
+
+  const currentData: PreparedImageData[] = [];
+  for (const img of currentImages) {
+    const prepared = await prepareImageData(img, currentInputAreBase64);
+    if (!prepared) continue;
+    currentData.push(prepared);
+  }
+
+  if (currentData.length === 0) {
+    return {
+      verified: false,
+      verifiedCandidateId: null,
+      verificationMode: "geometric",
+      diagnostics: undefined,
+    };
+  }
+
+  if (!baselineData.base64 || baselineData.base64.length < 100) {
+    return {
+      verified: false,
+      verifiedCandidateId: null,
+      verificationMode: "geometric",
+      diagnostics: undefined,
+    };
+  }
+  const validCurrentData = currentData.filter(d => d.base64 && d.base64.length >= 100);
+  if (validCurrentData.length === 0) {
+    return {
+      verified: false,
+      verifiedCandidateId: null,
+      verificationMode: "geometric",
+      diagnostics: undefined,
+    };
+  }
+
+  const currentFrames = await Promise.all(
+    validCurrentData.map(async (data): Promise<PreparedCurrentFrame> => {
+      const buffer = Buffer.from(data.base64, "base64");
+      return {
+        data,
+        buffer,
+        gray: await imageToGrayscale(buffer),
+      };
+    }),
+  );
+
+  const currentBuffer = currentFrames[0].buffer;
+
+  let currentEmbedding: number[] | undefined;
+  if (
+    candidateBaselines.length > 0 &&
+    candidateBaselines.some(
+      (candidate) => Array.isArray(candidate.embedding) && candidate.embedding.length > 0,
+    )
+  ) {
+    try {
+      currentEmbedding = await generateEmbeddingFromBuffer(currentBuffer, {
+        allowPlaceholder: process.env.ALLOW_PLACEHOLDER_EMBEDDINGS === "1",
+      });
+    } catch (error) {
+      console.warn("[compare] Server embedding reranking unavailable:", error);
     }
+  }
 
-    const currentData: PreparedImageData[] = [];
-    for (const img of currentImages) {
-      const prepared = await prepareImageData(img, currentInputAreBase64);
-      if (!prepared) {
-        console.warn(
-          `[compare] Skipping current image that failed to fetch: ${img.slice(0, 120)}`,
-        );
-        continue;
-      }
-      currentData.push(prepared);
-    }
-
-    if (currentData.length === 0) {
-      return buildComparisonUnavailableResult(
-        "Failed to read the captured image.",
-        "Capture again and retry.",
-      );
-    }
-
-    // Guard: skip AI call if baseline or current images have empty base64 data
-    if (!baselineData.base64 || baselineData.base64.length < 100) {
-      console.warn("[compare] Baseline image is empty or too small, skipping AI call");
-      return buildComparisonUnavailableResult(
-        "Reference image unavailable.",
-        "Try again in a moment.",
-      );
-    }
-    const validCurrentData = currentData.filter(d => d.base64 && d.base64.length >= 100);
-    if (validCurrentData.length === 0) {
-      console.warn("[compare] All current images are empty, skipping AI call");
-      return buildComparisonUnavailableResult(
-        "Captured image unavailable.",
-        "Capture again and retry.",
-      );
-    }
-
-    const currentFrames = await Promise.all(
-      validCurrentData.map(async (data): Promise<PreparedCurrentFrame> => {
-        const buffer = Buffer.from(data.base64, "base64");
-        return {
-          data,
-          buffer,
-          gray: await imageToGrayscale(buffer),
-        };
-      }),
-    );
-
-    const currentBuffer = currentFrames[0].buffer;
-
-    let currentEmbedding: number[] | undefined;
-    if (
-      candidateBaselines.length > 0 &&
-      candidateBaselines.some(
-        (candidate) => Array.isArray(candidate.embedding) && candidate.embedding.length > 0,
-      )
-    ) {
-      try {
-        currentEmbedding = await generateEmbeddingFromBuffer(currentBuffer, {
-          allowPlaceholder: process.env.ALLOW_PLACEHOLDER_EMBEDDINGS === "1",
-        });
-      } catch (error) {
-        console.warn("[compare] Server embedding reranking unavailable:", error);
-      }
-    }
-
-    const unresolvedCandidates: VerificationCandidate[] =
-      candidateBaselines.length > 0
-        ? candidateBaselines.map((candidate) => ({
+  const unresolvedCandidates: VerificationCandidate[] =
+    candidateBaselines.length > 0
+      ? candidateBaselines.map((candidate) => ({
             id: candidate.id,
             imageUrl: candidate.imageUrl,
             verificationImageUrl: candidate.verificationImageUrl,
             embedding: candidate.embedding,
           }))
-        : [
+      : [
             {
               id: FALLBACK_CANDIDATE_ID,
               imageUrl: baselineImage,
@@ -546,305 +565,432 @@ export async function compareImages(
             },
           ];
 
-    if (currentEmbedding) {
-      unresolvedCandidates.sort((a, b) => {
-        const simA =
-          Array.isArray(a.embedding) && a.embedding.length === currentEmbedding.length
-            ? cosineSimilarity(currentEmbedding, a.embedding)
-            : Number.NEGATIVE_INFINITY;
-        const simB =
-          Array.isArray(b.embedding) && b.embedding.length === currentEmbedding.length
-            ? cosineSimilarity(currentEmbedding, b.embedding)
-            : Number.NEGATIVE_INFINITY;
-        a.serverEmbeddingSimilarity = simA;
-        b.serverEmbeddingSimilarity = simB;
-        return simB - simA;
-      });
+  if (currentEmbedding) {
+    unresolvedCandidates.sort((a, b) => {
+      const simA =
+        Array.isArray(a.embedding) && a.embedding.length === currentEmbedding!.length
+          ? cosineSimilarity(currentEmbedding!, a.embedding)
+          : Number.NEGATIVE_INFINITY;
+      const simB =
+        Array.isArray(b.embedding) && b.embedding.length === currentEmbedding!.length
+          ? cosineSimilarity(currentEmbedding!, b.embedding)
+          : Number.NEGATIVE_INFINITY;
+      a.serverEmbeddingSimilarity = simA;
+      b.serverEmbeddingSimilarity = simB;
+      return simB - simA;
+    });
+  }
+
+  if (userSelectedCandidateId) {
+    const selectedIdx = unresolvedCandidates.findIndex(
+      (candidate) => candidate.id === userSelectedCandidateId,
+    );
+    if (selectedIdx > 0) {
+      const [selected] = unresolvedCandidates.splice(selectedIdx, 1);
+      unresolvedCandidates.unshift(selected);
     }
+  }
 
-    if (userSelectedCandidateId) {
-      const selectedIdx = unresolvedCandidates.findIndex(
-        (candidate) => candidate.id === userSelectedCandidateId,
-      );
-      if (selectedIdx > 0) {
-        const [selected] = unresolvedCandidates.splice(selectedIdx, 1);
-        unresolvedCandidates.unshift(selected);
-      }
-    }
-
-    const preparedCandidates = (
-      await Promise.all(
-        unresolvedCandidates.slice(0, 5).map(async (candidate) => {
-          if (candidate.id === FALLBACK_CANDIDATE_ID) {
-            return {
-              ...candidate,
-              verificationGray: await imageToGrayscale(
-                Buffer.from(baselineData.base64, "base64"),
-              ),
-            };
-          }
-
-          const verificationData = await prepareImageData(
-            candidate.verificationImageUrl || candidate.imageUrl,
-            false,
-          );
-          if (!verificationData) {
-            return null;
-          }
-
+  const preparedCandidates = (
+    await Promise.all(
+      unresolvedCandidates.slice(0, 5).map(async (candidate) => {
+        if (candidate.id === FALLBACK_CANDIDATE_ID) {
           return {
             ...candidate,
             verificationGray: await imageToGrayscale(
-              Buffer.from(verificationData.base64, "base64"),
+              Buffer.from(baselineData.base64, "base64"),
             ),
           };
-        }),
-      )
-    ).filter(
-      (
-        candidate,
-      ): candidate is VerificationCandidate & {
-        verificationGray: NonNullable<VerificationCandidate["verificationGray"]>;
-      } => Boolean(candidate?.verificationGray),
+        }
+
+        const attemptUrls = [
+          candidate.verificationImageUrl,
+          candidate.imageUrl,
+        ].filter(
+          (url, index, urls): url is string =>
+            typeof url === "string" &&
+            url.length > 0 &&
+            urls.indexOf(url) === index,
+        );
+
+        for (const attemptUrl of attemptUrls) {
+          const verificationData = await prepareImageData(attemptUrl, false);
+          if (!verificationData) continue;
+
+          try {
+            return {
+              ...candidate,
+              verificationGray: await imageToGrayscale(
+                Buffer.from(verificationData.base64, "base64"),
+              ),
+            };
+          } catch (error) {
+            console.warn(
+              `[compare] Failed to prepare verification asset for candidate ${candidate.id} from ${attemptUrl}:`,
+              error,
+            );
+          }
+        }
+
+        return null;
+      }),
+    )
+  ).filter(
+    (
+      candidate,
+    ): candidate is VerificationCandidate & {
+      verificationGray: NonNullable<VerificationCandidate["verificationGray"]>;
+    } => Boolean(candidate?.verificationGray),
+  );
+
+  if (preparedCandidates.length === 0) {
+    return {
+      verified: false,
+      verifiedCandidateId: null,
+      verificationMode: "geometric",
+      diagnostics: {
+        verified: false,
+        verifiedCandidateId: null,
+        candidatesAttempted: 0,
+        inlierCount: 0,
+        inlierRatio: 0,
+        inlierSpread: 0,
+        overlapArea: 0,
+        rejectionReasons: ["no_candidates_prepared"],
+      },
+    };
+  }
+
+  let bestCascade: Awaited<ReturnType<typeof runVerificationCascade>> | null = null;
+  let bestCurrentFrame = currentFrames[0];
+
+  for (const currentFrame of currentFrames) {
+    const cascadeAttempt = await runVerificationCascade(
+      getVerifier(),
+      preparedCandidates.map((candidate) => ({
+        id: candidate.id,
+        gray: candidate.verificationGray.gray,
+        width: candidate.verificationGray.width,
+        height: candidate.verificationGray.height,
+      })),
+      currentFrame.gray.gray,
+      currentFrame.gray.width,
+      currentFrame.gray.height,
     );
 
-    if (preparedCandidates.length === 0) {
-      return buildLocalizationFailedResult(null, { candidatesAttempted: 0 });
+    if (
+      !bestCascade ||
+      scoreVerificationAttempt(cascadeAttempt.verificationResult) >
+        scoreVerificationAttempt(bestCascade.verificationResult)
+    ) {
+      bestCascade = cascadeAttempt;
+      bestCurrentFrame = currentFrame;
     }
 
-    let bestCascade: Awaited<ReturnType<typeof runVerificationCascade>> | null = null;
-    let bestCurrentFrame = currentFrames[0];
-
-    for (const currentFrame of currentFrames) {
-      const cascadeAttempt = await runVerificationCascade(
-        getVerifier(),
-        preparedCandidates.map((candidate) => ({
-          id: candidate.id,
-          gray: candidate.verificationGray.gray,
-          width: candidate.verificationGray.width,
-          height: candidate.verificationGray.height,
-        })),
-        currentFrame.gray.gray,
-        currentFrame.gray.width,
-        currentFrame.gray.height,
-      );
-
-      if (
-        !bestCascade ||
-        scoreVerificationAttempt(cascadeAttempt.verificationResult) >
-          scoreVerificationAttempt(bestCascade.verificationResult)
-      ) {
-        bestCascade = cascadeAttempt;
-        bestCurrentFrame = currentFrame;
-      }
-
-      if (cascadeAttempt.verifiedCandidateId && cascadeAttempt.verificationResult?.verified) {
-        bestCascade = cascadeAttempt;
-        bestCurrentFrame = currentFrame;
-        break;
-      }
+    if (cascadeAttempt.verifiedCandidateId && cascadeAttempt.verificationResult?.verified) {
+      bestCascade = cascadeAttempt;
+      bestCurrentFrame = currentFrame;
+      break;
     }
+  }
 
-    const cascade =
-      bestCascade ||
-      ({
-        verifiedCandidateId: null,
-        verificationResult: null,
-        candidatesAttempted: 0,
-        allResults: [],
-      } satisfies Awaited<ReturnType<typeof runVerificationCascade>>);
-    const geometricResult = cascade.verificationResult;
-    const verifiedCandidate = cascade.verifiedCandidateId
-      ? preparedCandidates.find((candidate) => candidate.id === cascade.verifiedCandidateId) || null
+  const cascade =
+    bestCascade ||
+    ({
+      verifiedCandidateId: null,
+      verificationResult: null,
+      candidatesAttempted: 0,
+      allResults: [],
+    } satisfies Awaited<ReturnType<typeof runVerificationCascade>>);
+  const geometricResult = cascade.verificationResult;
+  const verifiedCandidate = cascade.verifiedCandidateId
+    ? preparedCandidates.find((candidate) => candidate.id === cascade.verifiedCandidateId) || null
+    : null;
+
+  const userBypassedVerification =
+    userConfirmed &&
+    (!verifiedCandidate || !geometricResult?.verified) &&
+    preparedCandidates.length > 0;
+
+  if (userBypassedVerification) {
+    const selectedMatch = userSelectedCandidateId
+      ? preparedCandidates.find((c) => c.id === userSelectedCandidateId)
       : null;
-
-    if (!verifiedCandidate || !geometricResult?.verified) {
-      return buildLocalizationFailedResult(geometricResult, {
-        verifiedCandidateId: cascade.verifiedCandidateId,
+    if (userSelectedCandidateId && !selectedMatch) {
+      console.warn(
+        `[compare] userSelectedCandidateId ${userSelectedCandidateId} not found in preparedCandidates, falling back to first candidate`,
+      );
+    }
+    const fallbackCandidate = selectedMatch || preparedCandidates[0];
+    Object.assign(cascade, { verifiedCandidateId: fallbackCandidate.id });
+  } else if (!verifiedCandidate || !geometricResult?.verified) {
+    // Localization failed
+    return {
+      verified: false,
+      verifiedCandidateId: cascade.verifiedCandidateId && cascade.verifiedCandidateId !== FALLBACK_CANDIDATE_ID
+        ? cascade.verifiedCandidateId
+        : null,
+      verificationMode: "geometric",
+      diagnostics: {
+        verified: false,
+        verifiedCandidateId: cascade.verifiedCandidateId && cascade.verifiedCandidateId !== FALLBACK_CANDIDATE_ID
+          ? cascade.verifiedCandidateId
+          : null,
         candidatesAttempted: cascade.candidatesAttempted,
         serverEmbeddingSimilarity:
-          preparedCandidates.find((candidate) => candidate.id === cascade.verifiedCandidateId)
-            ?.serverEmbeddingSimilarity,
-      });
-    }
-
-    const verifiedBaselineId =
-      verifiedCandidate.id === FALLBACK_CANDIDATE_ID ? null : verifiedCandidate.id;
-
-    const geometricDiagnostics = {
-      verified: true,
-      verifiedCandidateId: verifiedBaselineId,
-      candidatesAttempted: cascade.candidatesAttempted,
-      serverEmbeddingSimilarity: verifiedCandidate.serverEmbeddingSimilarity,
-      inlierCount: geometricResult.inlierCount,
-      inlierRatio: geometricResult.inlierRatio,
-      inlierSpread: geometricResult.inlierSpread,
-      overlapArea: geometricResult.overlapArea,
-      rejectionReasons: geometricResult.rejectionReasons,
+          preparedCandidates.find((c) => c.id === cascade.verifiedCandidateId)?.serverEmbeddingSimilarity,
+        inlierCount: geometricResult?.inlierCount ?? 0,
+        inlierRatio: geometricResult?.inlierRatio ?? 0,
+        inlierSpread: geometricResult?.inlierSpread ?? 0,
+        overlapArea: geometricResult?.overlapArea ?? 0,
+        rejectionReasons: geometricResult?.rejectionReasons ?? ["localization_failed"],
+      },
     };
+  }
 
-    let verifiedBaselineData = baselineData;
-    if (verifiedCandidate.id !== FALLBACK_CANDIDATE_ID) {
-      const fetchedVerifiedBaseline = await prepareImageData(
-        verifiedCandidate.imageUrl,
-        false,
-      );
-      if (!fetchedVerifiedBaseline) {
-        return buildComparisonUnavailableResult(
-          "Verified baseline image unavailable.",
-          "Try again in a moment.",
-          {
-            verifiedBaselineId,
-            geometricVerification: geometricDiagnostics,
-          },
-        );
-      }
+  // Re-resolve after potential user-confirmed promotion
+  const effectiveCandidate = userBypassedVerification
+    ? (preparedCandidates.find((c) => c.id === cascade.verifiedCandidateId) || preparedCandidates[0])
+    : verifiedCandidate!;
+
+  const verifiedBaselineId =
+    effectiveCandidate.id === FALLBACK_CANDIDATE_ID ? null : effectiveCandidate.id;
+
+  const geometricDiagnostics = {
+    verified: geometricResult?.verified ?? false,
+    userConfirmedBypass: userBypassedVerification || undefined,
+    verifiedCandidateId: verifiedBaselineId,
+    candidatesAttempted: cascade.candidatesAttempted,
+    serverEmbeddingSimilarity: effectiveCandidate.serverEmbeddingSimilarity,
+    inlierCount: geometricResult?.inlierCount ?? 0,
+    inlierRatio: geometricResult?.inlierRatio ?? 0,
+    inlierSpread: geometricResult?.inlierSpread ?? 0,
+    overlapArea: geometricResult?.overlapArea ?? 0,
+    rejectionReasons: geometricResult?.rejectionReasons ?? [],
+  };
+
+  // Fetch the verified baseline's display image for the AI phase
+  let verifiedBaselineData = baselineData;
+  if (effectiveCandidate.id !== FALLBACK_CANDIDATE_ID) {
+    const fetchedVerifiedBaseline = await prepareImageData(
+      effectiveCandidate.imageUrl,
+      false,
+    );
+    if (fetchedVerifiedBaseline) {
       verifiedBaselineData = fetchedVerifiedBaseline;
     }
+    // If fetch fails, fall back to the original baselineData
+  }
 
-    const preflight = await runPreflightGate({
-      baselineBase64: verifiedBaselineData.base64,
-      currentBase64: bestCurrentFrame.data.base64,
+  return {
+    verified: true,
+    verifiedCandidateId: verifiedBaselineId,
+    verificationMode: userBypassedVerification ? "user_confirmed_bypass" : "geometric",
+    diagnostics: geometricDiagnostics,
+    _prepared: {
+      verifiedBaselineData,
+      bestCurrentFrame,
+      validCurrentData,
+      verifiedBaselineId,
+      effectiveCandidate,
+    },
+  };
+}
+
+/**
+ * Phase 2: AI analysis (~100ms for preflight short-circuit, 5-30s for Claude).
+ * Requires a successful GeometryOutcome from verifyGeometry().
+ */
+export async function analyzeWithAI(
+  geometry: GeometryOutcome,
+  options: Pick<CompareImagesOptions, "roomName" | "inspectionMode" | "knownConditions">,
+): Promise<ComparisonResult> {
+  const {
+    roomName,
+    inspectionMode = "turnover",
+    knownConditions = [],
+  } = options;
+
+  if (!geometry.verified || !geometry._prepared) {
+    // Should not be called with a failed geometry outcome
+    return buildLocalizationFailedResult(null, {
+      candidatesAttempted: geometry.diagnostics?.candidatesAttempted ?? 0,
     });
+  }
 
-    if (preflight && !preflight.shouldCallAi) {
-      return {
-        status: "localized_no_change",
-        findings: [],
-        summary: "No meaningful visual change detected",
-        readiness_score: 100,
-        verifiedBaselineId,
-        userGuidance: "No action needed.",
-        diagnostics: {
-          skippedByPreflight: true,
-          preflight,
-          model: "preflight-gate",
-          geometricVerification: geometricDiagnostics,
-        },
-      };
-    }
+  const {
+    verifiedBaselineData,
+    bestCurrentFrame,
+    validCurrentData,
+    verifiedBaselineId,
+  } = geometry._prepared;
+  const geometricDiagnostics = geometry.diagnostics;
 
-    const anthropicKey = process.env.CLAUDE_API_KEY;
-    if (!anthropicKey) {
-      return buildComparisonUnavailableResult(
-        "AI unavailable",
-        "AI is unavailable right now. Try again shortly.",
-        {
-          verifiedBaselineId,
-          preflight: preflight || undefined,
-          geometricVerification: geometricDiagnostics,
-        },
-      );
-    }
+  // Preflight gate: fast "no change" detection before expensive Claude call
+  const preflight = await runPreflightGate({
+    baselineBase64: verifiedBaselineData.base64,
+    currentBase64: bestCurrentFrame.data.base64,
+  });
 
-    // Build message content
-    const content: any[] = [
-      {
-        type: "text",
-        text: `BASELINE IMAGE (how "${roomName}" should look):`,
+  if (preflight && !preflight.shouldCallAi) {
+    return {
+      status: "localized_no_change",
+      findings: [],
+      summary: "No meaningful visual change detected",
+      readiness_score: 100,
+      verifiedBaselineId,
+      userGuidance: "No action needed.",
+      diagnostics: {
+        skippedByPreflight: true,
+        preflight,
+        model: "preflight-gate",
+        geometricVerification: geometricDiagnostics,
       },
+    };
+  }
+
+  const anthropicKey = process.env.CLAUDE_API_KEY;
+  if (!anthropicKey) {
+    return buildComparisonUnavailableResult(
+      "AI unavailable",
+      "AI is unavailable right now. Try again shortly.",
+      {
+        verifiedBaselineId,
+        preflight: preflight || undefined,
+        geometricVerification: geometricDiagnostics,
+      },
+    );
+  }
+
+  // Build message content
+  const content: any[] = [
+    {
+      type: "text",
+      text: `BASELINE IMAGE (how "${roomName}" should look):`,
+    },
+    {
+      type: "image",
+      source: {
+        type: "base64",
+        media_type: verifiedBaselineData.mediaType,
+        data: verifiedBaselineData.base64,
+      },
+    },
+  ];
+
+  for (let i = 0; i < validCurrentData.length; i++) {
+    const label = validCurrentData.length > 1
+      ? `CURRENT IMAGE ${i + 1} of ${validCurrentData.length} (captured ${i * 500}ms apart):`
+      : `CURRENT IMAGE (how "${roomName}" looks now):`;
+
+    content.push(
+      { type: "text", text: label },
       {
         type: "image",
         source: {
           type: "base64",
-          media_type: verifiedBaselineData.mediaType,
-          data: verifiedBaselineData.base64,
+          media_type: validCurrentData[i].mediaType,
+          data: validCurrentData[i].base64,
         },
       },
-    ];
+    );
+  }
 
-    // Add current image(s)
-    for (let i = 0; i < validCurrentData.length; i++) {
-      const label = validCurrentData.length > 1
-        ? `CURRENT IMAGE ${i + 1} of ${validCurrentData.length} (captured ${i * 500}ms apart):`
-        : `CURRENT IMAGE (how "${roomName}" looks now):`;
+  content.push({
+    type: "text",
+    text: buildExpertPrompt(roomName, inspectionMode, knownConditions, validCurrentData.length),
+  });
 
-      content.push(
-        { type: "text", text: label },
-        {
-          type: "image",
-          source: {
-            type: "base64",
-            media_type: validCurrentData[i].mediaType,
-            data: validCurrentData[i].base64,
-          },
-        },
-      );
-    }
+  const aiModel = process.env.ANTHROPIC_VISION_MODEL || "claude-sonnet-4-20250514";
+  const aiStartedAt = Date.now();
+  const res = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    signal: AbortSignal.timeout(120000),
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": anthropicKey,
+      "anthropic-version": "2023-06-01",
+    },
+    body: JSON.stringify({
+      model: aiModel,
+      max_tokens: 4096,
+      messages: [{ role: "user", content }],
+    }),
+  });
 
-    // Add expert prompt
-    content.push({
-      type: "text",
-      text: buildExpertPrompt(roomName, inspectionMode, knownConditions, validCurrentData.length),
-    });
-
-    const aiModel = process.env.ANTHROPIC_VISION_MODEL || "claude-sonnet-4-20250514";
-    const aiStartedAt = Date.now();
-    const res = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      signal: AbortSignal.timeout(120000), // 2 minute timeout for AI comparison
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": anthropicKey,
-        "anthropic-version": "2023-06-01",
-      },
-      body: JSON.stringify({
-        model: aiModel,
-        max_tokens: 4096,
-        messages: [{ role: "user", content }],
-      }),
-    });
-
-    if (!res.ok) {
-      const errBody = await res.text().catch(() => "");
-      console.error(`[compare] Anthropic API error: ${res.status} ${res.statusText}`, errBody.slice(0, 300));
-      return buildComparisonUnavailableResult(
-        "Comparison unavailable",
-        "Try again in a moment.",
-        {
-          verifiedBaselineId,
-          preflight: preflight || undefined,
-          geometricVerification: geometricDiagnostics,
-          model: aiModel,
-          aiLatencyMs: Date.now() - aiStartedAt,
-        },
-      );
-    }
-
-    const data = await res.json();
-    const rawText = data.content?.[0]?.text;
-
-    if (!rawText) {
-      return buildComparisonUnavailableResult(
-        "Empty AI response",
-        "Try again in a moment.",
-        {
-          verifiedBaselineId,
-          preflight: preflight || undefined,
-          geometricVerification: geometricDiagnostics,
-          model: aiModel,
-          aiLatencyMs: Date.now() - aiStartedAt,
-        },
-      );
-    }
-
-    const parsed = parseComparisonResponse(rawText);
-    return {
-      status: "localized_changed",
-      findings: parsed.findings,
-      summary: parsed.summary,
-      readiness_score: parsed.readiness_score,
-      verifiedBaselineId,
-      userGuidance:
-        parsed.findings.length > 0 ? "Review the findings." : "Angle captured.",
-      diagnostics: {
+  if (!res.ok) {
+    const errBody = await res.text().catch(() => "");
+    console.error(`[compare] Anthropic API error: ${res.status} ${res.statusText}`, errBody.slice(0, 300));
+    return buildComparisonUnavailableResult(
+      "Comparison unavailable",
+      "Try again in a moment.",
+      {
+        verifiedBaselineId,
+        preflight: preflight || undefined,
+        geometricVerification: geometricDiagnostics,
         model: aiModel,
         aiLatencyMs: Date.now() - aiStartedAt,
-        preflight: preflight || undefined,
-        skippedByPreflight: false,
-        geometricVerification: geometricDiagnostics,
       },
-    };
+    );
+  }
+
+  const data = await res.json();
+  const rawText = data.content?.[0]?.text;
+
+  if (!rawText) {
+    return buildComparisonUnavailableResult(
+      "Empty AI response",
+      "Try again in a moment.",
+      {
+        verifiedBaselineId,
+        preflight: preflight || undefined,
+        geometricVerification: geometricDiagnostics,
+        model: aiModel,
+        aiLatencyMs: Date.now() - aiStartedAt,
+      },
+    );
+  }
+
+  const parsed = parseComparisonResponse(rawText);
+  return {
+    status: "localized_changed",
+    findings: parsed.findings,
+    summary: parsed.summary,
+    readiness_score: parsed.readiness_score,
+    verifiedBaselineId,
+    userGuidance:
+      parsed.findings.length > 0 ? "Review the findings." : "Angle captured.",
+    diagnostics: {
+      model: aiModel,
+      aiLatencyMs: Date.now() - aiStartedAt,
+      preflight: preflight || undefined,
+      skippedByPreflight: false,
+      geometricVerification: geometricDiagnostics,
+    },
+  };
+}
+
+/**
+ * Compare baseline and current images using Claude Vision API.
+ *
+ * Convenience wrapper that calls verifyGeometry() + analyzeWithAI() sequentially.
+ * Used by callers that don't need the intermediate verified event.
+ */
+export async function compareImages(
+  options: CompareImagesOptions,
+): Promise<ComparisonResult> {
+  try {
+    const geometry = await verifyGeometry(options);
+
+    if (!geometry.verified) {
+      return buildLocalizationFailedResult(null, {
+        verifiedCandidateId: geometry.verifiedCandidateId,
+        candidatesAttempted: geometry.diagnostics?.candidatesAttempted ?? 0,
+        serverEmbeddingSimilarity: geometry.diagnostics?.serverEmbeddingSimilarity,
+      });
+    }
+
+    return await analyzeWithAI(geometry, options);
   } catch (error) {
     console.error("[compare] Comparison failed:", error);
     return buildComparisonUnavailableResult(

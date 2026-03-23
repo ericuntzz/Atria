@@ -23,23 +23,32 @@ Next.js (TypeScript)          Python FastAPI
 | Auth | Supabase Auth |
 | Database | PostgreSQL + Drizzle ORM |
 | Vision AI | Claude Vision API (Python FastAPI service) |
-| Deployment | Replit |
+| Deployment | Vercel for `atria.so`, Cloudflare for DNS and Mission Control access |
 
 ## Getting Started
 
 ### Prerequisites
-- Node.js 20+
+- Node.js 22 LTS
 - Python 3.11+
 - PostgreSQL database (Neon recommended)
 - Supabase project (for auth)
 - Anthropic API key
 
+Node 25 is currently not supported for this repo. It reproduces `.next`
+trace/manifest `ENOENT` failures during `next build` and unstable dev-server
+behavior. Use Node 22 for web and Expo commands.
+
 ### Environment Variables
-Copy `.env.example` to `.env` and fill in your values.
+Copy `.env.example` to `.env.local` and fill in your values.
+
+For the hosted production app on Vercel, see [docs/VERCEL_DEPLOYMENT.md](docs/VERCEL_DEPLOYMENT.md).
 
 ### Development
 
 ```bash
+# Use the tested LTS runtime for this repo
+export PATH="$(brew --prefix node@22)/bin:$PATH"
+
 # Install dependencies
 npm install
 cd vision-service && pip install -r requirements.txt && cd ..

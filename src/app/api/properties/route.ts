@@ -55,6 +55,13 @@ export async function POST(request: NextRequest) {
         { status: 400 },
       );
     }
+    const SAFE_NAME_RE = /^[a-zA-Z0-9\s\-'.,#&()]+$/;
+    if (!SAFE_NAME_RE.test(String(body.name).trim())) {
+      return NextResponse.json(
+        { error: "Property name contains invalid characters" },
+        { status: 400 },
+      );
+    }
 
     const parseIntSafe = (val: unknown): number | null => {
       if (val == null || val === "") return null;

@@ -68,9 +68,9 @@ export async function POST(
 
   const { results, completionTier, notes, events } = body;
 
-  if (!results || !Array.isArray(results) || results.length === 0) {
+  if (!results || !Array.isArray(results)) {
     return NextResponse.json(
-      { error: "results array is required and must not be empty" },
+      { error: "results array is required" },
       { status: 400 },
     );
   }
@@ -267,25 +267,28 @@ export async function POST(
 
   // Transaction: atomically insert results + update inspection status
   const insertedResults = await db.transaction(async (tx) => {
-    const inserted = await tx
-      .insert(inspectionResults)
-      .values(
-        roomResults.map((result) => ({
-          inspectionId: id,
-          roomId: result.roomId,
-          baselineImageId: result.baselineImageId,
-          currentImageUrl: result.currentImageUrl || "",
-          status:
-            result.status ||
-            (result.score === null
-              ? "flagged"
-              : ((result.findings?.length ?? 0) === 0 ? "passed" : "flagged")),
-          score: result.score ?? null,
-          findings: result.findings || [],
-          rawResponse: result.rawResponse,
-        })),
-      )
-      .returning();
+    const inserted =
+      roomResults.length > 0
+        ? await tx
+            .insert(inspectionResults)
+            .values(
+              roomResults.map((result) => ({
+                inspectionId: id,
+                roomId: result.roomId,
+                baselineImageId: result.baselineImageId,
+                currentImageUrl: result.currentImageUrl || "",
+                status:
+                  result.status ||
+                  (result.score === null
+                    ? "flagged"
+                    : ((result.findings?.length ?? 0) === 0 ? "passed" : "flagged")),
+                score: result.score ?? null,
+                findings: result.findings || [],
+                rawResponse: result.rawResponse,
+              })),
+            )
+            .returning()
+        : [];
 
     await tx
       .update(inspections)

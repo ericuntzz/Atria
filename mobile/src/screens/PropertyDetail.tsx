@@ -115,8 +115,17 @@ export default function PropertyDetailScreen() {
   );
 
   const handleSave = async () => {
-    if (!name.trim()) {
+    const trimmedName = name.trim();
+    if (!trimmedName) {
       setError("Property name is required");
+      return;
+    }
+    if (trimmedName.length < 2 || trimmedName.length > 120) {
+      setError("Property name must be between 2 and 120 characters");
+      return;
+    }
+    if (!/^[a-zA-Z0-9\s\-'.,#&()]+$/.test(trimmedName)) {
+      setError("Property name contains invalid characters");
       return;
     }
 

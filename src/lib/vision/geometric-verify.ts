@@ -96,6 +96,9 @@ export async function imageToGrayscale(imageBuffer: Buffer): Promise<{
   height: number;
 }> {
   const { data, info } = await sharp(imageBuffer)
+    // Respect EXIF orientation so training-derived verification assets
+    // and live/current frames are normalized the same way.
+    .rotate()
     .resize(VERIFY_WIDTH, VERIFY_HEIGHT, { fit: "cover", position: "centre" })
     .greyscale()
     .raw()

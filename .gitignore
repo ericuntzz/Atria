@@ -5,6 +5,9 @@ node_modules/
 
 # next.js
 .next/
+.next-dev-*/
+.next_corrupt_*/
+.next_devcache_before_fix_*/
 out/
 
 # production

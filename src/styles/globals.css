@@ -19,8 +19,8 @@
   --popover: #FFFFFF;
   --popover-foreground: #1E1F24;
 
-  /* Primary: Sky Blue (interactive elements) */
-  --primary: #4DA6FF;
+  /* Primary: Sky Blue (interactive elements) — darkened from #4DA6FF for WCAG AA contrast */
+  --primary: #2372B8;
   --primary-foreground: #FFFFFF;
 
   /* Secondary: Light cool surface */
@@ -32,7 +32,7 @@
   --muted-foreground: #5F6775;
 
   /* Accent: Sky Blue */
-  --accent: #4DA6FF;
+  --accent: #2372B8;
   --accent-foreground: #FFFFFF;
 
   /* Destructive: Soft Red */
@@ -43,7 +43,7 @@
   --success: #4ADE80;
   --warning: #FBBF24;
   --error: #F87171;
-  --info: #4DA6FF;
+  --info: #2372B8;
 
   /* ── Borders: Warm Stone ───────────────── */
   --border: rgba(212, 200, 184, 0.5);

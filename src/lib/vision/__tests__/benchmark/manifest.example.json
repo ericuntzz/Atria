@@ -1,0 +1,22 @@
+{
+  "pairs": [
+    {
+      "id": "living-room-match-1",
+      "label": "Living room baseline vs matching capture",
+      "category": "true_match",
+      "baseline": "./fixtures/living-room-baseline.jpg",
+      "current": "./fixtures/living-room-current.jpg",
+      "expected": "match",
+      "notes": "Same angle, different lighting."
+    },
+    {
+      "id": "living-room-wrong-view-1",
+      "label": "Living room baseline vs wrong angle in same room",
+      "category": "same_room_wrong_view",
+      "baseline": "./fixtures/living-room-baseline.jpg",
+      "current": "./fixtures/living-room-other-angle.jpg",
+      "expected": "reject",
+      "notes": "Same room, different baseline target."
+    }
+  ]
+}

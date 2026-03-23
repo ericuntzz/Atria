@@ -1,6 +1,6 @@
 import { NextRequest } from "next/server";
 import { getDbUser, isValidUUID, isSafeUrl } from "@/lib/auth";
-import { compareImages, type InspectionMode } from "@/lib/vision/compare";
+import { verifyGeometry, analyzeWithAI, type InspectionMode, type GeometryOutcome } from "@/lib/vision/compare";
 import { db } from "@/server/db";
 import { baselineImages, baselineVersions, inspections, rooms } from "@/server/schema";
 import { eq, and, inArray } from "drizzle-orm";
@@ -25,7 +25,8 @@ import { emitEventSafe } from "@/lib/events/emit";
  *
  * Returns SSE:
  *   event: status (processing started)
- *   event: result (findings + score)
+ *   event: verified (geometric verification passed — client can grant early coverage credit)
+ *   event: result (findings + score from AI, or localization_failed)
  *   event: done (stream complete)
  */
 export async function POST(request: NextRequest) {
@@ -60,6 +61,7 @@ export async function POST(request: NextRequest) {
     clientSimilarity,
     topCandidateIds,
     userSelectedCandidateId,
+    userConfirmed,
   } = body;
 
   if (!baselineUrl || !currentImages || !roomName) {
@@ -242,6 +244,7 @@ export async function POST(request: NextRequest) {
 
       try {
         const compareStartedAt = Date.now();
+        const comparisonId = crypto.randomUUID();
 
         if (inspectionId && roomId && baselineImageId) {
           await emitEventSafe({
@@ -263,8 +266,7 @@ export async function POST(request: NextRequest) {
           });
         }
 
-        // Run comparison
-        const result = await compareImages({
+        const compareOptions = {
           baselineImage: baselineUrl as string,
           currentImages: images,
           roomName: roomName as string,
@@ -276,10 +278,63 @@ export async function POST(request: NextRequest) {
           clientSimilarity: validatedClientSimilarity,
           userSelectedCandidateId: validatedUserSelectedCandidateId,
           candidateBaselines: scopedCandidateBaselines,
-        });
+          userConfirmed: userConfirmed === true,
+        };
 
+        // Phase 1: Geometric verification (~500ms-2s)
+        const geometry = await verifyGeometry(compareOptions);
+
+        if (!geometry.verified) {
+          // Localization failed — emit result directly (no verified event)
+          const failedResult = {
+            status: "localization_failed" as const,
+            findings: [],
+            summary: "Could not verify this view.",
+            readiness_score: null,
+            verifiedBaselineId: geometry.verifiedCandidateId,
+            userGuidance: "Try a slightly different angle.",
+            comparisonId,
+            diagnostics: {
+              skippedByPreflight: true,
+              model: "geometric-verify",
+              geometricVerification: geometry.diagnostics,
+            },
+          };
+
+          controller.enqueue(
+            encoder.encode(
+              `event: result\ndata: ${JSON.stringify(failedResult)}\n\n`,
+            ),
+          );
+        } else {
+          // Emit fast "verified" event — client can grant coverage credit NOW
+          controller.enqueue(
+            encoder.encode(
+              `event: verified\ndata: ${JSON.stringify({
+                comparisonId,
+                verifiedBaselineId: geometry.verifiedCandidateId,
+                verificationMode: geometry.verificationMode,
+                diagnostics: geometry.diagnostics,
+              })}\n\n`,
+            ),
+          );
+
+          // Phase 2: Preflight + Claude Vision (~100ms-30s)
+          const result = await analyzeWithAI(geometry, compareOptions);
+
+          // Attach comparisonId for client-side correlation
+          const resultWithId = { ...result, comparisonId };
+
+          controller.enqueue(
+            encoder.encode(
+              `event: result\ndata: ${JSON.stringify(resultWithId)}\n\n`,
+            ),
+          );
+        }
+
+        // Emit telemetry event
         if (inspectionId && roomId && baselineImageId) {
-          const geometricDiagnostics = result.diagnostics?.geometricVerification;
+          const geometricDiagnostics = geometry.diagnostics;
           await emitEventSafe({
             eventType: "ComparisonReceived",
             aggregateId: inspectionId as string,
@@ -288,13 +343,12 @@ export async function POST(request: NextRequest) {
             payload: {
               roomId: roomId as string,
               baselineImageId: baselineImageId as string,
-              findingsCount: result.findings.length,
-              score: result.readiness_score ?? undefined,
+              findingsCount: 0,
               latencyMs: Date.now() - compareStartedAt,
               clientSimilarity: validatedClientSimilarity,
               topCandidateIds: validatedTopCandidateIds,
-              verifiedCandidateId: result.verifiedBaselineId ?? undefined,
-              gateDecision: result.status,
+              verifiedCandidateId: geometry.verifiedCandidateId ?? undefined,
+              gateDecision: geometry.verified ? "localized_changed" : "localization_failed",
               serverEmbeddingSimilarity:
                 geometricDiagnostics?.serverEmbeddingSimilarity,
               candidatesAttempted: geometricDiagnostics?.candidatesAttempted,
@@ -304,13 +358,6 @@ export async function POST(request: NextRequest) {
               geometricInlierSpread: geometricDiagnostics?.inlierSpread,
               geometricOverlapArea: geometricDiagnostics?.overlapArea,
               rejectionReasons: geometricDiagnostics?.rejectionReasons,
-              skippedByPreflight: result.diagnostics?.skippedByPreflight,
-              preflightReason: result.diagnostics?.preflight?.reason,
-              preflightSsim: result.diagnostics?.preflight?.ssim,
-              preflightDiffPercent:
-                result.diagnostics?.preflight?.diffPercent,
-              preflightAlignmentScore:
-                result.diagnostics?.preflight?.alignment?.score,
             },
             metadata: {
               source: "mobile",
@@ -320,17 +367,10 @@ export async function POST(request: NextRequest) {
           });
         }
 
-        // Send result event
-        controller.enqueue(
-          encoder.encode(
-            `event: result\ndata: ${JSON.stringify(result)}\n\n`,
-          ),
-        );
-
         // Send done event
         controller.enqueue(
           encoder.encode(
-            `event: done\ndata: ${JSON.stringify({ status: "complete" })}\n\n`,
+            `event: done\ndata: ${JSON.stringify({ comparisonId, status: "complete" })}\n\n`,
           ),
         );
       } catch (streamErr) {

@@ -73,6 +73,7 @@ export async function GET(
             embedding: baselineImages.embedding,
             qualityScore: baselineImages.qualityScore,
             embeddingModelVersion: baselineImages.embeddingModelVersion,
+            metadata: baselineImages.metadata,
           })
           .from(baselineImages)
           .where(

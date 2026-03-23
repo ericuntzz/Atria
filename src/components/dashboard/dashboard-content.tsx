@@ -288,6 +288,7 @@ function PropertiesTab({
             <select
               value={filterBy}
               onChange={(e) => setFilterBy(e.target.value as FilterOption)}
+              aria-label="Filter by status"
               className="bg-card border border-border rounded-lg px-2 py-1.5 text-xs text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
             >
               <option value="all">All</option>
@@ -300,6 +301,7 @@ function PropertiesTab({
             <select
               value={sortBy}
               onChange={(e) => setSortBy(e.target.value as SortOption)}
+              aria-label="Sort order"
               className="bg-card border border-border rounded-lg px-2 py-1.5 text-xs text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
             >
               <option value="newest">Newest First</option>
@@ -781,7 +783,7 @@ function StatCard({
 /* ─── Mobile Property Card ─────────────────────────────────── */
 function MobilePropertyCard({ property }: { property: Property }) {
   return (
-    <Link href={`/property/${property.id}`}>
+    <Link href={`/property/${property.id}`} aria-label={`View property: ${property.name}`}>
       <div className="flex items-center gap-3.5 p-3 rounded-2xl bg-card border border-border active:bg-card/70 transition-colors">
         {/* Thumbnail */}
         <div className="h-14 w-14 rounded-xl bg-secondary flex items-center justify-center overflow-hidden shrink-0 relative">
@@ -843,7 +845,7 @@ function MobilePropertyCard({ property }: { property: Property }) {
 /* ─── Desktop Property Card ────────────────────────────────── */
 function DesktopPropertyCard({ property }: { property: Property }) {
   return (
-    <Link href={`/property/${property.id}`}>
+    <Link href={`/property/${property.id}`} aria-label={`View property: ${property.name}`}>
       <Card className="bg-card border-border cursor-pointer hover:border-primary/50 transition-all group overflow-hidden">
         <div className="h-32 bg-secondary rounded-t-lg flex items-center justify-center overflow-hidden relative">
           <Home className="h-8 w-8 text-muted-foreground" />
@@ -864,7 +866,7 @@ function DesktopPropertyCard({ property }: { property: Property }) {
             <TrainingBadge status={property.trainingStatus} />
           </div>
           {(property.address || property.city) && (
-            <CardDescription className="flex items-center gap-1 text-muted-foreground min-w-0">
+            <CardDescription className="flex items-center gap-1 text-muted-foreground min-w-0 overflow-hidden">
               <MapPin className="h-3 w-3 shrink-0" />
               <span className="truncate">
                 {[property.address, property.city, property.state]

@@ -82,6 +82,25 @@ export async function PATCH(
       return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
     }
 
+    // Validate property name if included
+    if (body.name != null) {
+      const name = String(body.name).trim();
+      if (!name || name.length < 2 || name.length > 120) {
+        return NextResponse.json(
+          { error: "Property name must be between 2 and 120 characters" },
+          { status: 400 },
+        );
+      }
+      const SAFE_NAME_RE = /^[a-zA-Z0-9\s\-'.,#&()]+$/;
+      if (!SAFE_NAME_RE.test(name)) {
+        return NextResponse.json(
+          { error: "Property name contains invalid characters" },
+          { status: 400 },
+        );
+      }
+      body.name = name;
+    }
+
     // Only allow whitelisted fields
     const updates: Record<string, unknown> = { updatedAt: new Date() };
     for (const [key, value] of Object.entries(body)) {

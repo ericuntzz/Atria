@@ -15,6 +15,10 @@ export interface MotionFilterConfig {
   gyroThreshold: number;
   /** Maximum linear acceleration delta to consider "stable" (default 0.3) */
   accelThreshold: number;
+  /** Relaxed angular velocity threshold for walking captures */
+  walkthroughGyroThreshold: number;
+  /** Relaxed acceleration delta threshold for walking captures */
+  walkthroughAccelThreshold: number;
   /** Sensor update interval in ms (default 100) */
   updateInterval: number;
 }
@@ -23,6 +27,8 @@ const DEFAULT_CONFIG: MotionFilterConfig = {
   stableThresholdMs: 500,
   gyroThreshold: 0.15,
   accelThreshold: 0.3,
+  walkthroughGyroThreshold: 0.8,
+  walkthroughAccelThreshold: 1.2,
   updateInterval: 100,
 };
 
@@ -32,6 +38,9 @@ export class MotionFilter {
   private gyroSub: { remove: () => void } | null = null;
   private accelSub: { remove: () => void } | null = null;
   private lastAccel = { x: 0, y: 0, z: 0 };
+  private lastGyroMagnitude = Number.POSITIVE_INFINITY;
+  private lastAccelDelta = Number.POSITIVE_INFINITY;
+  private lastSampleAt = 0;
 
   constructor(config?: Partial<MotionFilterConfig>) {
     this.config = { ...DEFAULT_CONFIG, ...config };
@@ -51,6 +60,8 @@ export class MotionFilter {
 
     this.gyroSub = Gyroscope.addListener(({ x, y, z }) => {
       const magnitude = Math.sqrt(x * x + y * y + z * z);
+      this.lastGyroMagnitude = magnitude;
+      this.lastSampleAt = Date.now();
       if (magnitude > this.config.gyroThreshold) {
         this.markUnstable();
       }
@@ -63,6 +74,8 @@ export class MotionFilter {
       this.lastAccel = { x, y, z };
 
       const delta = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      this.lastAccelDelta = delta;
+      this.lastSampleAt = Date.now();
       if (delta > this.config.accelThreshold) {
         this.markUnstable();
       } else if (!this.stableSince) {
@@ -94,6 +107,19 @@ export class MotionFilter {
    */
   isMoving(): boolean {
     return !this.stableSince;
+  }
+
+  /**
+   * Relaxed motion gate for walkthrough capture.
+   * Allows capture while the user is moving steadily through a room,
+   * as long as the phone is not experiencing sharp shake or abrupt turns.
+   */
+  isWalkthroughReady(): boolean {
+    if (this.lastSampleAt === 0) return false;
+    return (
+      this.lastGyroMagnitude <= this.config.walkthroughGyroThreshold &&
+      this.lastAccelDelta <= this.config.walkthroughAccelThreshold
+    );
   }
 
   private markUnstable() {

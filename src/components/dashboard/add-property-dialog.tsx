@@ -70,6 +70,10 @@ export function AddPropertyDialog({
       setNameError("Property name must be 120 characters or fewer");
       return;
     }
+    if (!/^[a-zA-Z0-9\s\-'.,#&()]+$/.test(name)) {
+      setNameError("Property name contains invalid characters");
+      return;
+    }
     if (address.length > 200) {
       setAddressError("Address must be 200 characters or fewer");
       return;

@@ -66,6 +66,11 @@ interface RoomBaseline {
     previewUrl?: string;
     label: string | null;
     embedding: number[] | null;
+    metadata?: {
+      imageType?: "overview" | "detail" | "required_detail" | "standard";
+      parentBaselineId?: string | null;
+      detailSubject?: string | null;
+    } | null;
   }>;
 }
 
@@ -76,8 +81,8 @@ const LOCALIZATION_LOCKED_THRESHOLD = 0.50;
 const LOCALIZATION_AUTO_CAPTURE_THRESHOLD = 0.55;
 const LOCALIZATION_AMBIGUITY_GAP = 0.04;
 const LOCALIZATION_OVERLAY_GRACE_MS = 1400;
-const LOCALIZATION_ROOM_SYNC_THRESHOLD = 0.62;
-const AUTO_CAPTURE_INTERVAL_MS = 1500;
+const LOCALIZATION_ROOM_SYNC_THRESHOLD = 0.68;
+const AUTO_CAPTURE_INTERVAL_MS = 800;
 
 type LocalizationState =
   | "not_localized"        // No candidate above NOT_READY threshold (0.40)
@@ -93,11 +98,18 @@ function getSimilarityColor(similarity: number): string {
   return "#ef4444"; // red
 }
 
-function getLocalizationGuidance(state: LocalizationState): string | null {
+function getLocalizationGuidance(state: LocalizationState, stuckSince: number | null): string | null {
+  const stuckMs = stuckSince ? Date.now() - stuckSince : 0;
   switch (state) {
-    case "not_localized": return "Point camera at a trained area";
-    case "localizing": return "Hold steady...";
-    case "ambiguous": return "Move closer to distinguish views";
+    case "not_localized":
+      return stuckMs > 10000
+        ? "Try pointing at a distinctive area you trained"
+        : "Point camera at a trained area";
+    case "localizing": return "Keep the camera on this area";
+    case "ambiguous":
+      return stuckMs > 8000
+        ? "Tap a view below to capture it directly"
+        : "Move closer to distinguish views";
     case "localized": return null;
     case "capturing": return "Analyzing...";
     case "verification_failed": return "Try a slightly different angle";
@@ -239,10 +251,22 @@ export default function InspectionCameraScreen() {
   const autoCapturTickRef = useRef<((s: SessionManager, c: ComparisonManager) => Promise<void>) | undefined>(undefined);
   const autoCaptureStartTimeRef = useRef<number>(Date.now());
   const hasFirstAutoCaptureRef = useRef(false);
+  const userSelectedBaselineIdRef = useRef<string | null>(null);
+  const isCapturingRef = useRef(false);
+  /** Tracks consecutive localization failures per room+baseline to avoid cross-room false advancement */
+  const locFailuresByBaselineRef = useRef<Map<string, number>>(new Map());
+  /** Tracks in-flight AI analyses (after verified event, before result) */
+  const pendingAnalysesRef = useRef<Map<string, { roomId: string; baselineId: string; startedAt: number }>>(new Map());
+  /** Tracks comparisonIds that already received early coverage credit via verified event */
+  const verifiedComparisonIdsRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     autoCaptureEnabledRef.current = autoCaptureEnabled;
   }, [autoCaptureEnabled]);
+
+  useEffect(() => {
+    userSelectedBaselineIdRef.current = userSelectedBaselineId;
+  }, [userSelectedBaselineId]);
 
   useEffect(() => {
     pausedRef.current = paused;
@@ -313,7 +337,8 @@ export default function InspectionCameraScreen() {
   }, []);
 
   const captureHighResFrame = useCallback(async (): Promise<CapturedFrameData | null> => {
-    if (!cameraRef.current) return null;
+    if (!cameraRef.current || isCapturingRef.current) return null;
+    isCapturingRef.current = true;
     try {
       const photo = await cameraRef.current.takePictureAsync({
         quality: 0.7,
@@ -328,6 +353,8 @@ export default function InspectionCameraScreen() {
       };
     } catch {
       return null;
+    } finally {
+      isCapturingRef.current = false;
     }
   }, []);
 
@@ -358,7 +385,7 @@ export default function InspectionCameraScreen() {
         (baseline) => baseline.roomId === currentRoomId,
       );
       const searchSpace =
-        currentRoomBaselines.length > 0 && (lockedBaselineInfo?.similarity ?? 0) >= 0.68
+        currentRoomBaselines.length > 0 && (lockedBaselineInfo?.similarity ?? 0) >= LOCALIZATION_ROOM_SYNC_THRESHOLD
           ? currentRoomBaselines
           : allBaselines;
 
@@ -417,6 +444,73 @@ export default function InspectionCameraScreen() {
     const roomDetector = new RoomDetector();
     roomDetectorRef.current = roomDetector;
 
+    // Register verified callback — grants coverage credit early (~1-2s)
+    comparison.onVerified((event, context) => {
+      if (!isMountedRef.current) return;
+      const { roomId, roomName, baselineImageId } = context;
+      const resolvedBaseline = event.verifiedBaselineId
+        ? getBaselineById(event.verifiedBaselineId)
+        : baselineImageId
+          ? getBaselineById(baselineImageId)
+          : null;
+      const resolvedRoomId = resolvedBaseline?.roomId || roomId;
+      const resolvedBaselineId = event.verifiedBaselineId || baselineImageId;
+
+      // Mark this comparison as already credited
+      if (event.comparisonId) {
+        verifiedComparisonIdsRef.current.add(event.comparisonId);
+      }
+
+      // Track pending AI analysis
+      if (event.comparisonId && resolvedBaselineId) {
+        pendingAnalysesRef.current.set(event.comparisonId, {
+          roomId: resolvedRoomId,
+          baselineId: resolvedBaselineId,
+          startedAt: Date.now(),
+        });
+      }
+
+      // Clear localization failure streak on any verified result
+      locFailuresByBaselineRef.current.clear();
+
+      setLocalizationState("localized");
+      setShowTargetAssist(false);
+      setUserSelectedBaselineId(null);
+
+      // Room sync
+      if (resolvedBaseline && session.getState().currentRoomId !== resolvedBaseline.roomId) {
+        activateRoom(session, resolvedBaseline.roomId, resolvedBaseline.roomName);
+      }
+
+      // Grant coverage credit (directional hierarchy rules apply)
+      if (resolvedBaselineId) {
+        if (event.verificationMode === "user_confirmed_bypass") {
+          // Lower confidence — only credit the single baseline, no cluster/hierarchy expansion
+          session.recordAngleScan(resolvedRoomId, resolvedBaselineId);
+          roomDetectorRef.current?.markAngleScanned(resolvedBaselineId, resolvedRoomId);
+        } else {
+          // Geometric verified — full cluster + hierarchy credit
+          const clusterIds = roomDetectorRef.current?.getClusterMembers(resolvedBaselineId) || [resolvedBaselineId];
+          const hierarchyIds: string[] = [];
+          const hierarchy = roomDetectorRef.current?.getHierarchy(resolvedBaselineId);
+          if (hierarchy) {
+            if (hierarchy.parentId) hierarchyIds.push(hierarchy.parentId);
+            if (hierarchy.childIds.length > 0) hierarchyIds.push(...hierarchy.childIds);
+            // required_detail children are NOT auto-credited (they stay in requiredChildIds)
+          }
+          const allCreditIds = new Set([...clusterIds, ...hierarchyIds]);
+          for (const cid of allCreditIds) {
+            session.recordAngleScan(resolvedRoomId, cid);
+            roomDetectorRef.current?.markAngleScanned(cid, resolvedRoomId);
+          }
+        }
+        updateCoverageUI(session, resolvedRoomId);
+      }
+
+      showCaptureHint("✓ Captured (analyzing...)");
+      void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    });
+
     // Register finding callback
     comparison.onResult((result, context) => {
       if (!isMountedRef.current) return; // Skip state updates after unmount
@@ -442,18 +536,58 @@ export default function InspectionCameraScreen() {
         alignmentScore: result.diagnostics?.preflight?.alignment?.score,
       });
 
+      // Clean up pending analysis tracking for ALL result paths (including early returns).
+      // Must happen before any early-return to prevent leaking entries.
+      const comparisonId = result.comparisonId;
+      const alreadyCredited = comparisonId ? verifiedComparisonIdsRef.current.has(comparisonId) : false;
+      if (comparisonId) {
+        pendingAnalysesRef.current.delete(comparisonId);
+        verifiedComparisonIdsRef.current.delete(comparisonId);
+      }
+
       if (result.status === "localization_failed") {
+        // Track consecutive failures per room+baseline — reset all OTHER keys
+        // so only truly consecutive same-baseline failures accumulate
+        const failKey = `${resolvedRoomId}:${resolvedBaselineId || "unknown"}`;
+        const prevCount = locFailuresByBaselineRef.current.get(failKey) || 0;
+        const newCount = prevCount + 1;
+        // Clear every key except the current one to enforce consecutiveness
+        locFailuresByBaselineRef.current.clear();
+        locFailuresByBaselineRef.current.set(failKey, newCount);
+
         session.recordEvent("capture_rejected_alignment", resolvedRoomId, {
           baselineImageId: resolvedBaselineId,
           triggerSource,
           summary: result.summary,
+          consecutiveFailures: newCount,
         });
+
+        // After 3 consecutive failures for the SAME room+baseline,
+        // grant provisional progress so users aren't stuck at 0% forever.
+        if (newCount >= 3 && resolvedBaselineId) {
+          locFailuresByBaselineRef.current.delete(failKey);
+          // Provisional progress: only credit the single failed baseline, not cluster/children.
+          // Cluster + hierarchy credit requires actual server-verified evidence.
+          session.recordAngleScan(resolvedRoomId, resolvedBaselineId);
+          roomDetectorRef.current?.markAngleScanned(resolvedBaselineId, resolvedRoomId);
+          updateCoverageUI(session, resolvedRoomId);
+          setLocalizationState("localized");
+          setShowTargetAssist(false);
+          showCaptureHint("View captured (verification skipped)");
+          autoAdvanceIfRoomComplete(session, resolvedRoomId);
+          return;
+        }
+
         setLocalizationState("verification_failed");
         setShowTargetAssist(true);
         showCaptureHint(result.userGuidance || "Try a slightly different angle");
         void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
         return;
       }
+
+      // Any non-localization failure result breaks the "consecutive same-baseline
+      // failures" streak, including comparison_unavailable and successful captures.
+      locFailuresByBaselineRef.current.clear();
 
       if (result.status === "comparison_unavailable") {
         setLocalizationState("localized");
@@ -471,14 +605,38 @@ export default function InspectionCameraScreen() {
         activateRoom(session, resolvedBaseline.roomId, resolvedBaseline.roomName);
       }
 
-      // Only mark angle as scanned after server-verified comparison
-      if (resolvedBaselineId) {
-        session.recordAngleScan(resolvedRoomId, resolvedBaselineId);
-        roomDetectorRef.current?.markAngleScanned(resolvedBaselineId, resolvedRoomId);
-        updateCoverageUI(session, resolvedRoomId);
-        if ((result.findings?.length || 0) === 0) {
-          autoAdvanceIfRoomComplete(session, resolvedRoomId);
+      // Grant coverage credit ONLY if not already granted by verified event
+      if (resolvedBaselineId && !alreadyCredited) {
+        // 1. Cluster credit (visually similar angles)
+        const clusterIds = roomDetectorRef.current?.getClusterMembers(resolvedBaselineId) || [resolvedBaselineId];
+
+        // 2. Hierarchy credit (directional):
+        //    - Overview matched → credit detail children (wide shot proves items exist)
+        //      but NOT required_detail children (those need independent capture)
+        //    - Detail/required_detail matched → credit parent overview (you're in that area)
+        //    - No sibling credit in either direction
+        const hierarchyIds: string[] = [];
+        const hierarchy = roomDetectorRef.current?.getHierarchy(resolvedBaselineId);
+        if (hierarchy) {
+          if (hierarchy.parentId) {
+            hierarchyIds.push(hierarchy.parentId);
+          }
+          if (hierarchy.childIds.length > 0) {
+            hierarchyIds.push(...hierarchy.childIds);
+          }
         }
+
+        // 3. Union all (Set-based, no double-counting)
+        const allCreditIds = new Set([...clusterIds, ...hierarchyIds]);
+        for (const cid of allCreditIds) {
+          session.recordAngleScan(resolvedRoomId, cid);
+          roomDetectorRef.current?.markAngleScanned(cid, resolvedRoomId);
+        }
+        updateCoverageUI(session, resolvedRoomId);
+      }
+
+      if ((result.findings?.length || 0) === 0 && resolvedBaselineId) {
+        autoAdvanceIfRoomComplete(session, resolvedRoomId);
       }
 
       if (result.findings?.length > 0) {
@@ -522,8 +680,34 @@ export default function InspectionCameraScreen() {
       }
     });
 
+    let activeProcessingCount = 0;
+    let processingTimeoutId: ReturnType<typeof setTimeout> | null = null;
     comparison.onStatusChange((status) => {
-      setIsProcessing(status === "processing");
+      if (!isMountedRef.current) return;
+
+      // Ref-counted processing: supports maxConcurrent > 1
+      if (status === "processing") {
+        activeProcessingCount++;
+      } else {
+        activeProcessingCount = Math.max(0, activeProcessingCount - 1);
+      }
+      setIsProcessing(activeProcessingCount > 0);
+
+      // Safety timeout: only fires when ALL comparisons appear stuck
+      if (processingTimeoutId) {
+        clearTimeout(processingTimeoutId);
+        processingTimeoutId = null;
+      }
+      if (activeProcessingCount > 0) {
+        processingTimeoutId = setTimeout(() => {
+          if (isMountedRef.current && activeProcessingCount > 0) {
+            activeProcessingCount = 0;
+            setIsProcessing(false);
+            comparison.forceResetStuckComparison();
+            console.warn("[InspectionCamera] isProcessing safety timeout fired after 10s");
+          }
+        }, 10_000);
+      }
       if (status === "error") {
         showCaptureHint("That angle could not be analyzed. Try again.");
       }
@@ -578,7 +762,6 @@ export default function InspectionCameraScreen() {
     autoCaptureTimerRef.current = setInterval(() => {
       if (!autoCaptureEnabledRef.current) return;
       if (session.isPaused()) return;
-      if (!motionFilter.isStable()) return;
       if (comparison.isPaused()) return;
 
       const state = session.getState();
@@ -602,6 +785,9 @@ export default function InspectionCameraScreen() {
       }
       if (targetAssistTimerRef.current) {
         clearTimeout(targetAssistTimerRef.current);
+      }
+      if (processingTimeoutId) {
+        clearTimeout(processingTimeoutId);
       }
       announcerRef.current.setEnabled(false);
     };
@@ -777,6 +963,11 @@ export default function InspectionCameraScreen() {
             previewUrl?: string | null;
             label: string | null;
             embedding: number[] | null;
+            metadata?: {
+              imageType?: "overview" | "detail" | "required_detail" | "standard";
+              parentBaselineId?: string | null;
+              detailSubject?: string | null;
+            } | null;
           }>;
         }
 
@@ -790,6 +981,7 @@ export default function InspectionCameraScreen() {
               previewUrl: bl.previewUrl || undefined,
               label: bl.label || null,
               embedding: bl.embedding || null,
+              metadata: bl.metadata || null,
             })),
           }),
         );
@@ -808,6 +1000,7 @@ export default function InspectionCameraScreen() {
               imageUrl: b.imageUrl,
               previewUrl: b.previewUrl,
               embedding: b.embedding,
+              metadata: b.metadata,
             })),
           );
           detector.loadBaselines(detectorBaselines);
@@ -890,10 +1083,20 @@ export default function InspectionCameraScreen() {
 
         try {
           // Capture a low-res frame for room detection
-          const photo = await cameraRef.current.takePictureAsync({
-            quality: 0.3,
-            base64: false, // Just need the URI
-          });
+          if (isCapturingRef.current) {
+            roomDetectionTimerRef.current = setTimeout(tick, detector.getRecommendedInterval());
+            return;
+          }
+          isCapturingRef.current = true;
+          let photo: { uri?: string } | null = null;
+          try {
+            photo = await cameraRef.current.takePictureAsync({
+              quality: 0.3,
+              base64: false, // Just need the URI
+            });
+          } finally {
+            isCapturingRef.current = false;
+          }
 
           if (photo?.uri) {
             const result = await detector.processFrameFromUri(photo.uri);
@@ -939,7 +1142,9 @@ export default function InspectionCameraScreen() {
               } else if (!locked.isLocked) {
                 setLocalizationState("localizing");
                 setLocalizationStuckSince((prev) => prev ?? Date.now());
-              } else if (gap < LOCALIZATION_AMBIGUITY_GAP) {
+              } else if (gap < LOCALIZATION_AMBIGUITY_GAP && baselinesRef.current.length > 1) {
+                // Only show ambiguous state for multi-room properties;
+                // single-room properties should just use the best candidate
                 setLocalizationState("ambiguous");
                 setLocalizationStuckSince((prev) => prev ?? Date.now());
               } else if (locked.similarity >= LOCALIZATION_LOCKED_THRESHOLD) {
@@ -975,12 +1180,13 @@ export default function InspectionCameraScreen() {
   );
 
   const captureChangeFrame = useCallback(async (): Promise<Uint8Array | null> => {
-    if (!cameraRef.current) return null;
+    if (!cameraRef.current || isCapturingRef.current) return null;
 
     let rawPhotoUri: string | null = null;
     let resizedUri: string | null = null;
 
     try {
+      isCapturingRef.current = true;
       const photo = await cameraRef.current.takePictureAsync({
         quality: 0.2,
         base64: false,
@@ -1010,6 +1216,7 @@ export default function InspectionCameraScreen() {
     } catch {
       return null;
     } finally {
+      isCapturingRef.current = false;
       if (rawPhotoUri) {
         FileSystem.deleteAsync(rawPhotoUri, { idempotent: true }).catch(() => {});
       }
@@ -1046,7 +1253,10 @@ export default function InspectionCameraScreen() {
       const isStrongLock = locked?.isLocked && locked.similarity >= LOCALIZATION_AUTO_CAPTURE_THRESHOLD;
 
       // When strongly locked, still skip if ambiguous (top-2 too close)
-      if (isStrongLock && topK.length >= 2) {
+      // UNLESS: user has explicitly selected a baseline, or the property only has 1 room
+      const isSingleRoom = baselinesRef.current.length <= 1;
+      const userHasSelected = !!userSelectedBaselineIdRef.current;
+      if (isStrongLock && topK.length >= 2 && !userHasSelected && !isSingleRoom) {
         const gap = topK[0].similarity - topK[1].similarity;
         if (gap < LOCALIZATION_AMBIGUITY_GAP) return;
       }
@@ -1095,9 +1305,11 @@ export default function InspectionCameraScreen() {
       const changeResult = changeFrame
         ? comparison.feedChangeFrame(changeFrame)
         : undefined;
+      const allowWalkthroughMotion = true;
       if (
         !comparison.shouldTrigger(changeResult, {
           allowInitialStillFrame: (visit?.anglesScanned.size || 0) === 0,
+          allowWalkthroughMotion,
         })
       ) {
         return;
@@ -1127,6 +1339,28 @@ export default function InspectionCameraScreen() {
         FileSystem.deleteAsync(firstCapture.uri, { idempotent: true }).catch(() => {});
       }
       if (!isMountedRef.current || pausedRef.current) return;
+
+      // Coverage-aware selection: prefer unscanned-cluster candidates within
+      // 0.10 similarity of the top candidate to capture new areas first
+      if (detector && rerankedTopK.length >= 2) {
+        const topSim = rerankedTopK[0].similarity;
+        const topIsScanned = !detector.isInUnscannedCluster(rerankedTopK[0].baselineId, currentRoomId);
+        if (topIsScanned) {
+          const unscannedAlt = rerankedTopK.find(
+            (c) =>
+              c.similarity >= topSim - 0.10 &&
+              getBaselineById(c.baselineId)?.roomId === currentRoomId &&
+              detector.isInUnscannedCluster(c.baselineId, currentRoomId),
+          );
+          if (unscannedAlt) {
+            // Promote unscanned candidate to front
+            rerankedTopK = [
+              unscannedAlt,
+              ...rerankedTopK.filter((c) => c.baselineId !== unscannedAlt.baselineId),
+            ];
+          }
+        }
+      }
 
       const selectedBaseline =
         getBaselineById(rerankedTopK[0]?.baselineId || baseline.id) || {
@@ -1186,6 +1420,7 @@ export default function InspectionCameraScreen() {
           clientSimilarity: rerankedTopK[0]?.similarity ?? bestSimilarity,
           topCandidateIds: rerankedTopK.slice(0, 3).map(c => c.baselineId),
           userSelectedCandidateId: userSelectedBaselineId || undefined,
+          skipBurst: !(motionFilterRef.current?.isStable() ?? true),
           refreshToken: async () => {
             const { data } = await supabase.auth.refreshSession();
             return data.session?.access_token ?? null;
@@ -1296,6 +1531,34 @@ export default function InspectionCameraScreen() {
 
   const handleEndInspection = useCallback(async () => {
     if (isSubmittingRef.current) return;
+
+    // Clean up stale pending analyses (>90s)
+    const now = Date.now();
+    for (const [id, entry] of pendingAnalysesRef.current) {
+      if (now - entry.startedAt > 90_000) {
+        pendingAnalysesRef.current.delete(id);
+        verifiedComparisonIdsRef.current.delete(id);
+        console.warn(`[InspectionCamera] Stale pending analysis ${id} cleaned up after 90s`);
+      }
+    }
+
+    // Warn if AI analyses are still in-flight
+    const pendingCount = pendingAnalysesRef.current.size;
+    if (pendingCount > 0) {
+      const proceed = await new Promise<boolean>((resolve) => {
+        Alert.alert(
+          "Analyses in Progress",
+          `${pendingCount} angle${pendingCount > 1 ? "s are" : " is"} still being analyzed by AI. Coverage is already recorded — finishing now may miss some findings.`,
+          [
+            { text: "Wait", style: "cancel", onPress: () => resolve(false) },
+            { text: "Finish Now", style: "destructive", onPress: () => resolve(true) },
+          ],
+          { cancelable: true, onDismiss: () => resolve(false) },
+        );
+      });
+      if (!proceed) return;
+    }
+
     isSubmittingRef.current = true;
 
     // Pause capture loops to prevent late findings from being missed
@@ -1345,6 +1608,8 @@ export default function InspectionCameraScreen() {
         continue;
       }
 
+      // Only include rooms with actual evidence — prevents phantom completions
+      // when user opens and immediately ends an inspection
       if (!hasVerifiedCoverage && confirmedFindings.length === 0) {
         continue;
       }
@@ -1376,35 +1641,33 @@ export default function InspectionCameraScreen() {
 
     const eventLog = session.getEvents();
 
-    if (results.length > 0) {
+    try {
+      await flushBulkSubmissionQueue();
+      await submitBulkResults(
+        inspectionId,
+        results,
+        session.getCompletionTier(),
+        undefined,
+        eventLog,
+      );
+    } catch (err) {
+      console.error("Failed to submit results:", err);
       try {
-        await flushBulkSubmissionQueue();
-        await submitBulkResults(
+        await enqueueBulkSubmission({
           inspectionId,
           results,
-          session.getCompletionTier(),
-          undefined,
-          eventLog,
+          completionTier: session.getCompletionTier(),
+          events: eventLog,
+        });
+        Alert.alert(
+          "Saved for sync",
+          "Inspection ended and results were saved on-device. They will auto-sync when your connection is available.",
         );
-      } catch (err) {
-        console.error("Failed to submit results:", err);
-        try {
-          await enqueueBulkSubmission({
-            inspectionId,
-            results,
-            completionTier: session.getCompletionTier(),
-            events: eventLog,
-          });
-          Alert.alert(
-            "Saved for sync",
-            "Inspection ended and results were saved on-device. They will auto-sync when your connection is available.",
-          );
-        } catch {
-          Alert.alert(
-            "Sync warning",
-            "Inspection ended, but we could not sync or queue results on this device.",
-          );
-        }
+      } catch {
+        Alert.alert(
+          "Sync warning",
+          "Inspection ended, but we could not sync or queue results on this device.",
+        );
       }
     }
 
@@ -1661,6 +1924,124 @@ export default function InspectionCameraScreen() {
     localizationStuckSince,
   ]);
 
+  /**
+   * Target-assist tap capture — immediately triggers a comparison against the
+   * user-selected baseline, bypassing the normal localization gate.
+   */
+  const handleTargetAssistCapture = useCallback(async (baselineId: string) => {
+    if (!isMountedRef.current) return;
+    const session = sessionRef.current;
+    const comparison = comparisonRef.current;
+    if (!session || !comparison || !cameraRef.current || pausedRef.current) return;
+    if (isProcessingRef.current) {
+      showCaptureHint("AI is still processing the last capture...");
+      return;
+    }
+
+    // Resolve the tapped baseline from the full baselines list, not just current room.
+    // Ambiguous candidates can span rooms, so we must carry the real room context.
+    const resolved = getBaselineById(baselineId);
+    if (!resolved) return;
+
+    const selectedRoomId = resolved.roomId;
+    const selectedRoomName = resolved.roomName;
+
+    if (!comparison.canTriggerManual()) {
+      showCaptureHint("Give the last capture a moment to finish.");
+      return;
+    }
+
+    showCaptureHint(`Capturing ${resolved.label || "selected view"}...`);
+
+    const {
+      data: { session: authSession },
+    } = await supabase.auth.getSession();
+    if (!isMountedRef.current || pausedRef.current) return;
+    if (!authSession?.access_token) {
+      showCaptureHint("Session expired. Please restart the app.");
+      return;
+    }
+
+    const apiUrl = process.env.EXPO_PUBLIC_API_URL;
+    if (!apiUrl) return;
+
+    const firstCapture = await captureHighResFrame();
+    if (!isMountedRef.current || pausedRef.current || !firstCapture) {
+      if (firstCapture) {
+        FileSystem.deleteAsync(firstCapture.uri, { idempotent: true }).catch(() => {});
+      }
+      showCaptureHint("Capture failed. Try again.");
+      return;
+    }
+
+    // Clean up the captured file after extracting the data URI
+    const capturedDataUri = firstCapture.dataUri;
+    FileSystem.deleteAsync(firstCapture.uri, { idempotent: true }).catch(() => {});
+
+    // If the tapped baseline belongs to a different room, switch to it
+    const currentRoomId = session.getState().currentRoomId;
+    if (currentRoomId !== selectedRoomId) {
+      activateRoom(session, selectedRoomId, selectedRoomName);
+    }
+
+    const roomKnownConditions = Array.from(
+      new Set([
+        ...(globalKnownConditionsRef.current || []),
+        ...(knownConditionsByRoomRef.current.get(selectedRoomId) || []),
+      ]),
+    );
+
+    let reusedInitialFrame = false;
+    const captureFrame = async () => {
+      if (!reusedInitialFrame) {
+        reusedInitialFrame = true;
+        return capturedDataUri;
+      }
+      const burstFrame = await captureHighResFrame();
+      if (!burstFrame) return null;
+      FileSystem.deleteAsync(burstFrame.uri, { idempotent: true }).catch(() => {});
+      return burstFrame.dataUri;
+    };
+
+    session.recordEvent("comparison_requested", selectedRoomId, {
+      baselineImageId: resolved.id,
+      triggerSource: "target_assist",
+    });
+
+    setLocalizationState("capturing");
+    setShowTargetAssist(false);
+    void comparison.triggerComparison(
+      captureFrame,
+      resolved.imageUrl,
+      selectedRoomName,
+      selectedRoomId,
+      {
+        inspectionMode,
+        knownConditions: roomKnownConditions,
+        inspectionId,
+        baselineImageId: resolved.id,
+        triggerSource: "manual",
+        apiUrl,
+        authToken: authSession.access_token,
+        clientSimilarity: 0,
+        topCandidateIds: [resolved.id],
+        userSelectedCandidateId: baselineId,
+        userConfirmed: true,
+        refreshToken: async () => {
+          const { data } = await supabase.auth.refreshSession();
+          return data.session?.access_token ?? null;
+        },
+      },
+    );
+  }, [
+    captureHighResFrame,
+    getBaselineById,
+    activateRoom,
+    inspectionMode,
+    inspectionId,
+    showCaptureHint,
+  ]);
+
   const handleConfirmFinding = useCallback((findingId: string) => {
     sessionRef.current?.updateFindingStatus(findingId, "confirmed");
     setFindings((prev) => prev.filter((f) => f.id !== findingId));
@@ -1831,16 +2212,25 @@ export default function InspectionCameraScreen() {
 
       {lockedBaselineInfo &&
         !paused &&
-        (localizationState === "ambiguous" || showTargetAssist) && (
+        !isProcessing &&
+        (localizationState === "ambiguous" || showTargetAssist) &&
+        /* Delay showing assist UI — give auto-capture 8s to resolve on its own */
+        (localizationStuckSince != null && Date.now() - localizationStuckSince > 8000) && (
           <View style={styles.targetAssistStrip}>
             <Text style={styles.targetAssistLabel}>
-              {showTargetAssist ? "Which view are you looking at?" : "Tap a view to help localize"}
+              Tap a view to help AI
             </Text>
             <View style={styles.ambiguousThumbnails}>
-              {lockedBaselineInfo.topCandidates.slice(0, 3).map((candidate) => {
+              {lockedBaselineInfo.topCandidates.slice(0, 3).map((candidate, idx) => {
                 const baseline = getBaselineById(candidate.baselineId);
                 if (!baseline) return null;
                 const isSelected = userSelectedBaselineId === candidate.baselineId;
+                const isMultiRoom = baselinesRef.current.length > 1;
+                // Multi-room: always lead with room name so cross-room candidates are distinguishable
+                // Single-room: use baseline label or generic "View N"
+                const viewLabel = isMultiRoom
+                  ? (baseline.roomName || `Room ${idx + 1}`)
+                  : (baseline.label || `View ${idx + 1}`);
 
                 return (
                   <TouchableOpacity
@@ -1852,10 +2242,9 @@ export default function InspectionCameraScreen() {
                     activeOpacity={0.8}
                     onPress={() => {
                       setUserSelectedBaselineId(candidate.baselineId);
-                      showCaptureHint(
-                        `Selected: ${baseline.label || baseline.roomName || "this view"}`,
-                      );
                       void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                      // Immediately trigger a comparison against the selected baseline
+                      void handleTargetAssistCapture(candidate.baselineId);
                     }}
                   >
                     <Image
@@ -1864,19 +2253,14 @@ export default function InspectionCameraScreen() {
                       contentFit="cover"
                       cachePolicy="none"
                     />
-                    {/* Room name badge — helps disambiguate cross-room candidates */}
+                    {/* Badge: room name for multi-room, view number for single-room */}
                     <View style={styles.ambiguousThumbRoomBadge}>
                       <Text style={styles.ambiguousThumbRoomText} numberOfLines={1}>
-                        {baseline.roomName || "Room"}
+                        {viewLabel}
                       </Text>
                     </View>
-                    {baseline.label ? (
-                      <Text style={styles.ambiguousThumbLabel} numberOfLines={2}>
-                        {baseline.label}
-                      </Text>
-                    ) : null}
                     <Text style={styles.ambiguousThumbHint}>
-                      {isSelected ? "✓ Selected" : "Tap"}
+                      {isSelected ? "Capturing..." : "Tap"}
                     </Text>
                   </TouchableOpacity>
                 );
@@ -1891,7 +2275,7 @@ export default function InspectionCameraScreen() {
           <Text style={styles.localizationGuideText}>
             {localizationState === "not_localized" && autoDetectUnavailableReason
               ? autoDetectUnavailableReason
-              : getLocalizationGuidance(localizationState)}
+              : getLocalizationGuidance(localizationState, localizationStuckSince)}
           </Text>
         </View>
       )}
@@ -2032,20 +2416,15 @@ export default function InspectionCameraScreen() {
               />
             </TouchableOpacity>
 
-            {/* Notes button — consolidated add+view */}
+            {/* Notes button — always opens the notes log (with inline add) */}
             <TouchableOpacity
               style={[styles.utilityButton, styles.utilityButtonWide]}
-              onPress={() =>
-                manualNotes.length > 0
-                  ? setShowNotesLogModal(true)
-                  : handleAddNote()
-              }
-              onLongPress={handleAddNote}
+              onPress={() => setShowNotesLogModal(true)}
               activeOpacity={0.7}
               accessibilityRole="button"
               accessibilityLabel={
                 manualNotes.length > 0
-                  ? "View inspection notes"
+                  ? `${manualNotes.length} inspection note${manualNotes.length > 1 ? "s" : ""}`
                   : "Add a note"
               }
             >
@@ -2055,7 +2434,7 @@ export default function InspectionCameraScreen() {
                 color="rgba(255,255,255,0.8)"
               />
               <Text style={styles.utilityButtonText}>
-                {manualNotes.length > 0 ? `Notes (${manualNotes.length})` : "Notes"}
+                {manualNotes.length > 0 ? `Notes (${manualNotes.length})` : "Add Note"}
               </Text>
             </TouchableOpacity>
 
@@ -2140,7 +2519,9 @@ export default function InspectionCameraScreen() {
             <View style={styles.notesLogModalContent}>
               <Text style={styles.noteModalTitle}>Inspection Notes</Text>
               <Text style={styles.noteModalSubtitle}>
-                Review and remove notes while inspecting
+                {manualNotes.length > 0
+                  ? "Review and manage your notes"
+                  : "Add notes about issues you see during the inspection"}
               </Text>
 
               <View style={styles.notesLogList}>
@@ -2162,19 +2543,19 @@ export default function InspectionCameraScreen() {
               </View>
 
               <TouchableOpacity
-                style={[styles.noteModalCancel, { marginBottom: 8 }]}
+                style={[styles.noteModalSubmit, { marginBottom: 8 }]}
                 onPress={() => {
                   setShowNotesLogModal(false);
                   setTimeout(() => handleAddNote(), 300);
                 }}
               >
-                <Text style={styles.noteModalCancelText}>+ Add Note</Text>
+                <Text style={styles.noteModalSubmitText}>+ Add Note</Text>
               </TouchableOpacity>
               <TouchableOpacity
-                style={styles.noteModalSubmit}
+                style={styles.noteModalCancel}
                 onPress={() => setShowNotesLogModal(false)}
               >
-                <Text style={styles.noteModalSubmitText}>Done</Text>
+                <Text style={styles.noteModalCancelText}>Done</Text>
               </TouchableOpacity>
             </View>
           </View>
@@ -2210,7 +2591,7 @@ export default function InspectionCameraScreen() {
                   <View>
                     <Text style={styles.settingsLabel}>Hands-Free Capture</Text>
                     <Text style={styles.settingsDescription}>
-                      Atria captures new angles automatically when the phone is steady
+                      Atria captures new angles automatically when the AI has a usable view
                     </Text>
                   </View>
                 </View>

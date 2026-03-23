@@ -2,7 +2,8 @@
  * Comparison Manager — "The Silent Trigger"
  *
  * Orchestrates when to send frames to the server for AI comparison.
- * Only triggers when: hasMeaningfulChange AND isStable AND cooldownElapsed.
+ * Default path prefers stable frames, but can also allow slow walkthrough
+ * motion when the caller has strong localization confidence.
  *
  * Features:
  * - Burst capture: 2 high-res frames 500ms apart (detects motion like running water)
@@ -53,6 +54,8 @@ export interface ComparisonResult {
   verifiedBaselineId: string | null;
   userGuidance: string;
   diagnostics?: ComparisonDiagnostics;
+  /** Server-generated UUID for correlating verified → result events in split pipeline */
+  comparisonId?: string;
 }
 
 export interface ComparisonManagerConfig {
@@ -67,9 +70,9 @@ export interface ComparisonManagerConfig {
 }
 
 const DEFAULT_CONFIG: ComparisonManagerConfig = {
-  minIntervalMs: 1800,
-  maxConcurrent: 1,
-  burstDelayMs: 500,
+  minIntervalMs: 1200,
+  maxConcurrent: 2,
+  burstDelayMs: 250,
   manualMinIntervalMs: 900,
 };
 
@@ -82,8 +85,20 @@ export interface ComparisonContext {
   triggerSource: ComparisonTriggerSource;
 }
 
+/** Emitted when geometric verification passes (before AI analysis starts) */
+export interface VerifiedEvent {
+  comparisonId: string;
+  verifiedBaselineId: string;
+  verificationMode: "geometric" | "user_confirmed_bypass";
+  diagnostics?: Record<string, unknown>;
+}
+
 type ComparisonCallback = (
   result: ComparisonResult,
+  context: ComparisonContext,
+) => void;
+type VerifiedCallback = (
+  event: VerifiedEvent,
   context: ComparisonContext,
 ) => void;
 type StatusCallback = (status: "processing" | "complete" | "error") => void;
@@ -103,12 +118,14 @@ export class ComparisonManager {
   private changeDetector: ChangeDetector;
   private lastComparisonTime = 0;
   private activeComparisons = 0;
+  private comparisonGeneration = 0; // incremented on force-reset to invalidate stale finally blocks
   private paused = false;
   private lastChangeResult: ChangeDetectionResult | null = null;
   private consecutiveFailures = 0;
   private static readonly MAX_BACKOFF_FAILURES = 5;
 
   private onFinding: ComparisonCallback | null = null;
+  private onVerifiedCallback: VerifiedCallback | null = null;
   private onStatus: StatusCallback | null = null;
 
   constructor(
@@ -126,6 +143,14 @@ export class ComparisonManager {
    */
   onResult(callback: ComparisonCallback) {
     this.onFinding = callback;
+  }
+
+  /**
+   * Register callback for when geometric verification passes (early coverage credit).
+   * Fires ~1-2s into the comparison, before Claude Vision starts.
+   */
+  onVerified(callback: VerifiedCallback) {
+    this.onVerifiedCallback = callback;
   }
 
   /**
@@ -152,13 +177,19 @@ export class ComparisonManager {
    */
   shouldTrigger(
     changeResult?: ChangeDetectionResult,
-    options?: { allowInitialStillFrame?: boolean },
+    options?: {
+      allowInitialStillFrame?: boolean;
+      allowWalkthroughMotion?: boolean;
+    },
   ): boolean {
     const result = changeResult || this.lastChangeResult;
 
     if (this.paused) return false;
     if (this.activeComparisons >= this.config.maxConcurrent) return false;
-    if (!this.motionFilter.isStable()) return false;
+    const motionOk =
+      this.motionFilter.isStable() ||
+      (options?.allowWalkthroughMotion && this.motionFilter.isWalkthroughReady());
+    if (!motionOk) return false;
 
     // Exponential backoff on consecutive failures (3s, 6s, 12s, 24s, 48s cap)
     const backoffMultiplier = Math.min(
@@ -235,20 +266,30 @@ export class ComparisonManager {
       topCandidateIds?: string[];
       /** User-selected target hint — server still verifies independently */
       userSelectedCandidateId?: string;
+      /** When true, user explicitly confirmed this baseline — server relaxes geometric gate */
+      userConfirmed?: boolean;
       /** Token refresh function — called on 401 to get a fresh token */
       refreshToken?: () => Promise<string | null>;
+      /** Skip burst capture (single frame only) — use during walking to save ~250ms */
+      skipBurst?: boolean;
     },
     cropFrame?: CropFrameFn,
   ) {
     this.activeComparisons++;
+    const startGeneration = this.comparisonGeneration;
     this.lastComparisonTime = Date.now();
     this.onStatus?.("processing");
 
+    /** True if a force-reset has invalidated this comparison */
+    const isStale = () => startGeneration !== this.comparisonGeneration;
+
     try {
-      // Burst capture: 2 frames 500ms apart
-      const frames = await this.captureBurst(captureFrame);
+      // Capture frames: single frame when walking, burst (2 frames) when stable
+      const frames = options.skipBurst
+        ? await captureFrame().then((f) => (f ? [f] : []))
+        : await this.captureBurst(captureFrame);
       if (frames.length === 0) {
-        this.onStatus?.("error");
+        if (!isStale()) this.onStatus?.("error");
         return;
       }
 
@@ -297,6 +338,7 @@ export class ComparisonManager {
             clientSimilarity: options.clientSimilarity,
             topCandidateIds: options.topCandidateIds,
             userSelectedCandidateId: options.userSelectedCandidateId,
+            userConfirmed: options.userConfirmed || undefined,
           }),
           signal: controller.signal,
         });
@@ -330,6 +372,7 @@ export class ComparisonManager {
                 clientSimilarity: options.clientSimilarity,
                 topCandidateIds: options.topCandidateIds,
                 userSelectedCandidateId: options.userSelectedCandidateId,
+                userConfirmed: options.userConfirmed || undefined,
               }),
               signal: retryController.signal,
             });
@@ -339,6 +382,9 @@ export class ComparisonManager {
         }
       }
 
+      // If force-reset happened while we were waiting on the network, silently bail
+      if (isStale()) return;
+
       if (!res.ok) {
         this.consecutiveFailures++;
         this.onStatus?.("error");
@@ -347,6 +393,10 @@ export class ComparisonManager {
 
       // Parse SSE response — handle multi-line data fields
       const text = await res.text();
+
+      // Final staleness check before delivering results
+      if (isStale()) return;
+
       const sseEvents = text.split("\n\n");
       let receivedResult = false;
       for (const event of sseEvents) {
@@ -356,16 +406,33 @@ export class ComparisonManager {
         const dataPayload = dataLines
           ? dataLines.map((line) => line.slice(6)).join("\n")
           : null;
-        if (typeMatch?.[1] === "result" && dataPayload) {
+        if (typeMatch?.[1] === "verified" && dataPayload) {
+          // Fast path: geometric verification passed — grant early coverage credit
+          if (!isStale()) {
+            try {
+              const verified: VerifiedEvent = JSON.parse(dataPayload);
+              this.onVerifiedCallback?.(verified, {
+                roomId,
+                roomName,
+                baselineImageId: options.baselineImageId,
+                triggerSource: options.triggerSource || "auto",
+              });
+            } catch (parseErr) {
+              console.warn("[ComparisonManager] Failed to parse SSE verified:", parseErr);
+            }
+          }
+        } else if (typeMatch?.[1] === "result" && dataPayload) {
           try {
             const result: ComparisonResult = JSON.parse(dataPayload);
             receivedResult = true;
-            this.onFinding?.(result, {
-              roomId,
-              roomName,
-              baselineImageId: options.baselineImageId,
-              triggerSource: options.triggerSource || "auto",
-            });
+            if (!isStale()) {
+              this.onFinding?.(result, {
+                roomId,
+                roomName,
+                baselineImageId: options.baselineImageId,
+                triggerSource: options.triggerSource || "auto",
+              });
+            }
           } catch (parseErr) {
             console.warn("[ComparisonManager] Failed to parse SSE result:", parseErr);
           }
@@ -385,10 +452,17 @@ export class ComparisonManager {
         this.onStatus?.("error");
       }
     } catch {
-      this.consecutiveFailures++;
-      this.onStatus?.("error");
+      if (!isStale()) {
+        this.consecutiveFailures++;
+        this.onStatus?.("error");
+      }
     } finally {
-      this.activeComparisons--;
+      // Only decrement if this comparison hasn't been force-reset.
+      // A force-reset bumps the generation and zeroes the counter;
+      // decrementing after that would push it negative.
+      if (startGeneration === this.comparisonGeneration) {
+        this.activeComparisons--;
+      }
     }
   }
 
@@ -433,5 +507,22 @@ export class ComparisonManager {
    */
   resetBackoff() {
     this.consecutiveFailures = 0;
+  }
+
+  /**
+   * Force-reset a stuck comparison slot so the capture pipeline can resume.
+   * Call this only as a safety fallback when a comparison has been in-flight
+   * too long (e.g. 10s+). The underlying HTTP request may still complete
+   * in the background, but new captures will no longer be blocked.
+   */
+  forceResetStuckComparison() {
+    if (this.activeComparisons > 0) {
+      console.warn(
+        `[ComparisonManager] Force-resetting ${this.activeComparisons} stuck comparison(s)`,
+      );
+      this.comparisonGeneration++;
+      this.activeComparisons = 0;
+      this.onStatus?.("complete");
+    }
   }
 }

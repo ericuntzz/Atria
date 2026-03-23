@@ -167,6 +167,16 @@ type RoomAnalysis = {
     condition?: unknown;
     importance?: unknown;
   }>;
+  image_classifications?: Record<string, {
+    type?: string;
+    parent_url?: string | null;
+    detail_subject?: string | null;
+  }>;
+  imageClassifications?: Record<string, {
+    type?: string;
+    parent_url?: string | null;
+    detail_subject?: string | null;
+  }>;
 };
 
 type PropertyAnalysis = {
@@ -430,7 +440,18 @@ export async function POST(
           : roomData.imageLabels && typeof roomData.imageLabels === "object"
             ? roomData.imageLabels
             : {};
+      const roomImageClassifications: Record<string, {
+        type?: string;
+        parent_url?: string | null;
+        detail_subject?: string | null;
+      }> =
+        roomData.image_classifications && typeof roomData.image_classifications === "object"
+          ? (roomData.image_classifications as Record<string, { type?: string; parent_url?: string | null; detail_subject?: string | null }>)
+          : roomData.imageClassifications && typeof roomData.imageClassifications === "object"
+            ? (roomData.imageClassifications as Record<string, { type?: string; parent_url?: string | null; detail_subject?: string | null }>)
+            : {};
       let baselineCount = 0;
+      const insertedBaselinesByUrl: Array<{ id: string; imageUrl: string }> = [];
 
       for (const imgUrl of roomImageUrls) {
         // Only insert valid, safe string URLs from AI response
@@ -438,15 +459,49 @@ export async function POST(
         if (!isSafeUrl(imgUrl)) continue;
         const labelFromAi =
           typeof roomImageLabels[imgUrl] === "string" ? roomImageLabels[imgUrl] : null;
-        await db.insert(baselineImages).values({
+        const [inserted] = await db.insert(baselineImages).values({
           roomId: newRoom.id,
           imageUrl: imgUrl,
           label:
             labelFromAi?.trim().slice(0, 100) ||
             `${roomName} view ${baselineCount + 1}`,
           isActive: true,
-        });
+        }).returning({ id: baselineImages.id });
+        if (inserted) {
+          insertedBaselinesByUrl.push({ id: inserted.id, imageUrl: imgUrl });
+        }
         baselineCount++;
+      }
+
+      // Store image classification metadata (overview/detail/standard + parent-child links)
+      if (Object.keys(roomImageClassifications).length > 0 && insertedBaselinesByUrl.length > 0) {
+        for (const { id, imageUrl } of insertedBaselinesByUrl) {
+          const classification = roomImageClassifications[imageUrl];
+          if (!classification?.type) continue;
+
+          const imageType = (["overview", "detail", "required_detail", "standard"] as const).includes(
+            classification.type as "overview" | "detail" | "required_detail" | "standard",
+          )
+            ? (classification.type as "overview" | "detail" | "required_detail" | "standard")
+            : ("standard" as const);
+
+          // Resolve parent_url to a baseline ID
+          let parentBaselineId: string | null = null;
+          if (classification.parent_url && typeof classification.parent_url === "string") {
+            const parent = insertedBaselinesByUrl.find(b => b.imageUrl === classification.parent_url);
+            parentBaselineId = parent?.id ?? null;
+          }
+
+          await db.update(baselineImages)
+            .set({
+              metadata: {
+                imageType,
+                parentBaselineId,
+                detailSubject: classification.detail_subject || null,
+              },
+            })
+            .where(eq(baselineImages.id, id));
+        }
       }
 
       // If no specific images assigned, distribute available images
@@ -458,12 +513,16 @@ export async function POST(
           ((i + 1) * imageUrls.length) / analysis.rooms.length,
         );
         for (let j = startIdx; j < endIdx && j < imageUrls.length; j++) {
-          await db.insert(baselineImages).values({
+          const fallbackUrl = imageUrls[j];
+          const [inserted] = await db.insert(baselineImages).values({
             roomId: newRoom.id,
-            imageUrl: imageUrls[j],
+            imageUrl: fallbackUrl,
             label: `${roomName} view ${j - startIdx + 1}`,
             isActive: true,
-          });
+          }).returning({ id: baselineImages.id });
+          if (inserted) {
+            insertedBaselinesByUrl.push({ id: inserted.id, imageUrl: fallbackUrl });
+          }
           baselineCount++;
         }
       }
@@ -827,6 +886,13 @@ Return ONLY valid JSON (no other text) with this structure:
       "image_labels": {
         "matching image url": "Short waypoint label like Sink wall, Entry angle, Vanity counter"
       },
+      "image_classifications": {
+        "matching image url": {
+          "type": "overview | detail | required_detail | standard",
+          "parent_url": "url of the overview image this detail belongs to, or null",
+          "detail_subject": "what this close-up is examining, or null"
+        }
+      },
       "items": [
         {
           "name": "Item name (e.g. Leather Sofa, Crystal Chandelier)",
@@ -840,7 +906,14 @@ Return ONLY valid JSON (no other text) with this structure:
   ]
 }
 
-Analyze all images and group them by room. Be thorough — identify every significant item visible. If multiple images show the same room from different angles, group them together. When possible, provide short per-image labels for each room view so the inspection app can guide users back to the right angle later.`,
+Analyze all images and group them by room. Be thorough — identify every significant item visible. If multiple images show the same room from different angles, group them together. When possible, provide short per-image labels for each room view so the inspection app can guide users back to the right angle later.
+
+For each image, also classify it in image_classifications:
+- "overview": shows the full room or a large section from a distance
+- "detail": a close-up of a specific item, fixture, or area that is visible in an overview shot. These get automatically covered when the overview is matched.
+- "required_detail": a close-up that requires independent verification — the inspector must specifically capture this angle. Use this for images showing the inside of cabinets, drawers, closets, appliance interiors, under-sink areas, or anything that is NOT visible from the overview shot and requires physically opening, moving, or closely inspecting something.
+- "standard": a normal room angle that is neither a wide overview nor a tight close-up
+For detail and required_detail images, set parent_url to the overview image URL that contains or is nearest to the subject, and detail_subject to the item name. This helps the inspection app understand spatial relationships between wide and close-up views.`,
               },
               ...imageContents,
             ],

@@ -156,6 +156,9 @@ export const baselineImages = pgTable("baseline_images", {
     captureOrientation?: { pitch: number; yaw: number; roll: number };
     captureSequence?: number;
     captureHeading?: number;
+    imageType?: "overview" | "detail" | "required_detail" | "standard";
+    parentBaselineId?: string | null;
+    detailSubject?: string | null;
   }>(),
   createdAt: timestamp("created_at").defaultNow(),
 }, (table) => [

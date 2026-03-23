@@ -135,6 +135,10 @@ export default function PropertiesScreen() {
       setNewPropertyError("Property name must be 120 characters or fewer.");
       return;
     }
+    if (!/^[a-zA-Z0-9\s\-'.,#&()]+$/.test(trimmed)) {
+      setNewPropertyError("Property name contains invalid characters.");
+      return;
+    }
 
     setCreating(true);
     setNewPropertyError(null);

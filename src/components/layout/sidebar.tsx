@@ -81,13 +81,13 @@ export function Sidebar({ userEmail }: SidebarProps) {
           aria-label="Notifications (coming soon)"
           title="Coming soon"
           disabled
-          className="flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm text-sidebar-foreground/40 cursor-not-allowed w-full"
+          className="flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm text-sidebar-foreground/50 cursor-not-allowed w-full"
         >
           <Bell className="h-4 w-4 shrink-0" />
           {!collapsed && (
             <span className="flex items-center gap-2">
               Notifications
-              <span className="text-[10px] font-medium bg-sidebar-accent/30 text-sidebar-foreground/50 px-1.5 py-0.5 rounded">Soon</span>
+              <span className="text-[10px] font-medium bg-sidebar-accent/30 text-sidebar-foreground/60 px-1.5 py-0.5 rounded">Soon</span>
             </span>
           )}
         </button>
@@ -98,6 +98,7 @@ export function Sidebar({ userEmail }: SidebarProps) {
         <button
           onClick={() => setCollapsed(!collapsed)}
           aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+          aria-expanded={!collapsed}
           className="flex items-center gap-3 px-3 py-2 rounded-lg text-sm text-sidebar-foreground hover:bg-sidebar-accent/50 hover:text-foreground w-full transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
         >
           {collapsed ? (
