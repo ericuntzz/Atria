@@ -2394,7 +2394,7 @@ export default function InspectionCameraScreen() {
       )}
 
       {/* Top HUD — rendered OUTSIDE CameraView so touches work on iOS */}
-      <SafeAreaView style={styles.topHud}>
+      <SafeAreaView style={styles.topHud} edges={["top"]}>
           <View style={styles.topBar}>
             <TouchableOpacity
               style={styles.endButton}
@@ -2482,7 +2482,7 @@ export default function InspectionCameraScreen() {
         )}
 
         {/* Bottom controls */}
-        <SafeAreaView style={styles.bottomControls}>
+        <SafeAreaView style={styles.bottomControls} edges={["bottom"]}>
           {captureHint && (
             <View style={styles.captureHintBubble}>
               <Text style={styles.captureHintText}>{captureHint}</Text>
@@ -2929,7 +2929,7 @@ const styles = StyleSheet.create({
     bottom: 0,
     left: 0,
     right: 0,
-    paddingBottom: 24,
+    paddingBottom: 8,
     zIndex: 10,
   },
   captureRow: {
@@ -2980,6 +2980,7 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
     width: 60,
+    minHeight: 44,
     gap: 4,
   },
   utilityButtonWide: {
