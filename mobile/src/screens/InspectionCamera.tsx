@@ -913,6 +913,14 @@ export default function InspectionCameraScreen() {
         }
       } else if (nextAppState === "active" && appStateRef.wasBackground) {
         appStateRef.wasBackground = false;
+
+        // Re-check camera permission — user may have revoked in Settings
+        if (permission && !permission.granted) {
+          console.warn("[InspectionCamera] Camera permission revoked while backgrounded");
+          // Don't restart loops — the permission-denied UI will render
+          return;
+        }
+
         if (!pausedRef.current) {
           motionFilterRef.current?.start();
 
@@ -938,7 +946,25 @@ export default function InspectionCameraScreen() {
     };
 
     const subscription = AppState.addEventListener("change", handleAppStateChange);
-    return () => subscription.remove();
+
+    // Memory warning handler — reduce footprint to avoid iOS jetsam kill
+    const memorySubscription = AppState.addEventListener("memoryWarning", () => {
+      console.warn("[InspectionCamera] iOS memory warning received — reducing footprint");
+      // Pause room detection loop (biggest memory consumer: ONNX inference + camera)
+      if (roomDetectionTimerRef.current) {
+        clearTimeout(roomDetectionTimerRef.current);
+        roomDetectionTimerRef.current = null;
+      }
+      // Dispose ONNX model to free memory
+      modelLoaderRef.current?.dispose();
+      // Force-reset any stuck comparisons to free buffered images
+      comparisonRef.current?.forceResetStuckComparison();
+    });
+
+    return () => {
+      subscription.remove();
+      memorySubscription.remove();
+    };
   }, []);
 
   const updateCoverageUI = useCallback(

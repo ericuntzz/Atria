@@ -69,6 +69,11 @@ export function enqueueBulkSubmission(params: {
 }): Promise<void> {
   return withQueueLock(async () => {
     const queue = await readQueue();
+    // Dedup: skip if this inspectionId is already queued (prevents double-enqueue on race)
+    if (queue.some((entry) => entry.inspectionId === params.inspectionId)) {
+      console.warn(`[offline-queue] Skipping duplicate enqueue for inspection ${params.inspectionId}`);
+      return;
+    }
     queue.push({
       id: `bulk-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       inspectionId: params.inspectionId,
