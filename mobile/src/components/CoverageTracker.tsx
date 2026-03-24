@@ -62,7 +62,7 @@ export default function CoverageTracker({
       </View>
 
       {totalCount > 0 && (
-        <Text style={styles.roomProgressText} numberOfLines={1} ellipsizeMode="tail">
+        <Text style={styles.roomProgressText} numberOfLines={2}>
           {currentRoomName ? `${currentRoomName}: ` : ""}
           {scannedCount}/{totalCount} angles
           {roomCoverage !== null ? ` (${roomCoverage}%)` : ""}
@@ -115,6 +115,7 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     gap: 10,
+    flexWrap: "wrap",
   },
   barBackground: {
     flex: 1,
@@ -130,13 +131,14 @@ const styles = StyleSheet.create({
   percentText: {
     fontSize: 12,
     fontWeight: "600",
-    minWidth: 86,
-    textAlign: "right",
+    minWidth: 0,
+    textAlign: "left",
   },
   roomProgressText: {
     color: "rgba(255,255,255,0.8)",
     fontSize: 12,
     fontWeight: "500",
+    lineHeight: 17,
   },
   waypointsRow: {
     flexDirection: "row",

@@ -2494,7 +2494,7 @@ export default function InspectionCameraScreen() {
               accessibilityLabel={`Current room: ${currentRoom || "Scanning"}`}
             >
               <View style={styles.roomBadgeHeader}>
-                <Text style={styles.roomName}>
+                <Text style={styles.roomName} numberOfLines={2}>
                   {currentRoom || "Scanning..."}
                 </Text>
                 {roomModeLabel ? (
@@ -2509,7 +2509,7 @@ export default function InspectionCameraScreen() {
                 ) : null}
               </View>
               {roomAngles.total > 0 && (
-                <Text style={styles.angleCount} numberOfLines={1}>
+                <Text style={styles.angleCount} numberOfLines={2}>
                   {roomAngles.scanned}/{roomAngles.total} angles
                 </Text>
               )}
@@ -2887,9 +2887,10 @@ const styles = StyleSheet.create({
   topBar: {
     flexDirection: "row",
     justifyContent: "space-between",
-    alignItems: "center",
+    alignItems: "flex-start",
     paddingHorizontal: 16,
     paddingTop: 8,
+    gap: 10,
   },
   endButton: {
     backgroundColor: "rgba(0,0,0,0.65)",
@@ -2898,6 +2899,7 @@ const styles = StyleSheet.create({
     paddingVertical: 10,
     borderWidth: 1,
     borderColor: "rgba(255,255,255,0.08)",
+    flexShrink: 0,
   },
   endButtonText: {
     color: "#fff",
@@ -2909,19 +2911,25 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     paddingHorizontal: 18,
     paddingVertical: 10,
-    alignItems: "center",
+    alignItems: "flex-start",
     borderWidth: 1,
     borderColor: "rgba(77,166,255,0.3)",
+    flex: 1,
+    minWidth: 0,
   },
   roomBadgeHeader: {
     flexDirection: "row",
-    alignItems: "center",
+    alignItems: "flex-start",
+    flexWrap: "wrap",
     gap: 8,
+    width: "100%",
   },
   roomName: {
     color: "#fff",
     fontSize: 16,
     fontWeight: "600",
+    flexShrink: 1,
+    minWidth: 0,
   },
   detectModeBadge: {
     backgroundColor: "rgba(255,255,255,0.15)",
@@ -2943,6 +2951,7 @@ const styles = StyleSheet.create({
     fontSize: 12,
     marginTop: 2,
     fontWeight: "500",
+    width: "100%",
   },
   recBadge: {
     flexDirection: "row",
@@ -2954,6 +2963,7 @@ const styles = StyleSheet.create({
     gap: 6,
     borderWidth: 1,
     borderColor: "rgba(239, 68, 68, 0.2)",
+    flexShrink: 0,
   },
   recDot: {
     width: 8,
