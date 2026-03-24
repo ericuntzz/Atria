@@ -171,21 +171,21 @@ const nextConfig: NextConfig = {
     ],
   },
   outputFileTracingIncludes: {
-    ...buildTraceRouteMap(sharpOnlyRoutes, sharpTraceIncludes),
-    ...buildTraceRouteMap(nativeVisionRoutes, [
-      ...sharpTraceIncludes,
-      ...onnxTraceIncludes,
-    ]),
+    // All vision routes get sharp only — onnxruntime-node (~335 MB) exceeds
+    // Vercel Hobby's 250 MB function-size limit and is excluded entirely.
+    // Routes that need ONNX should use a separate inference service or API.
+    ...buildTraceRouteMap([...sharpOnlyRoutes, ...nativeVisionRoutes], sharpTraceIncludes),
   },
   outputFileTracingExcludes: {
     ...buildTraceRouteMap(
       [...sharpOnlyRoutes, ...nativeVisionRoutes],
-      sharpTraceExcludes,
+      [
+        ...sharpTraceExcludes,
+        // Exclude all onnxruntime binaries from every serverless function
+        "./node_modules/onnxruntime-node/**/*",
+        "./node_modules/onnxruntime-common/**/*",
+      ],
     ),
-    ...buildTraceRouteMap(nativeVisionRoutes, [
-      ...sharpTraceExcludes,
-      ...onnxTraceExcludes,
-    ]),
   },
   webpack: (config, { dev }) => {
     if (dev) {
