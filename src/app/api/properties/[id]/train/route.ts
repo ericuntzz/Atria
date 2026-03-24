@@ -960,7 +960,7 @@ Return ONLY valid JSON (no other text) with this structure:
       "description": "Brief description of the room",
       "image_urls": ["urls of images showing this room"],
       "image_labels": {
-        "matching image url": "Short waypoint label like Sink wall, Entry angle, Vanity counter"
+        "matching image url": "REQUIRED: 2-4 word label describing what the camera is pointing at. Examples: Bookshelf wall, Exercise equipment, Reading chair corner, Entry doorway, TV mount area. NEVER use generic labels like 'View 1' or 'Angle 2'. Describe the dominant visual anchor in the image."
       },
       "image_classifications": {
         "matching image url": {
@@ -982,7 +982,9 @@ Return ONLY valid JSON (no other text) with this structure:
   ]
 }
 
-Analyze all images and group them by room. Be thorough — identify every significant item visible. If multiple images show the same room from different angles, group them together. When possible, provide short per-image labels for each room view so the inspection app can guide users back to the right angle later.
+Analyze all images and group them by room. Be thorough — identify every significant item visible. If multiple images show the same room from different angles, group them together.
+
+CRITICAL: Every image MUST have an image_label. Labels must describe what the camera is pointing at in 2-4 words (e.g., "Bookshelf wall", "Exercise equipment", "Reading chair corner"). These labels are shown to inspectors during walkthroughs to guide them to the right spot. NEVER use generic labels like "View 1", "Angle 2", or "Room overview" — always describe the visual anchor (the most distinctive object or area visible). If two images show similar content, differentiate them: "Left bookshelf" vs "Right bookshelf", "Equipment front" vs "Equipment side".
 
 For each image, also classify it in image_classifications:
 - "overview": shows the full room or a large section from a distance

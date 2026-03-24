@@ -220,7 +220,7 @@ export default function InspectionCameraScreen() {
   const [showTargetAssist, setShowTargetAssist] = useState(false);
   const [zoom, setZoom] = useState(0);
   const [roomWaypoints, setRoomWaypoints] = useState<
-    Array<{ id: string; label: string | null; scanned: boolean }>
+    Array<{ id: string; label: string | null; scanned: boolean; previewUrl?: string | null }>
   >([]);
   const cameraRef = useRef<CameraView>(null);
   const baseZoomRef = useRef(0);
@@ -1042,6 +1042,7 @@ export default function InspectionCameraScreen() {
                 index,
               ),
               scanned: detectorScanned.has(b.id) || visit.anglesScanned.has(b.id),
+              previewUrl: b.previewUrl || b.imageUrl || null,
             })),
           );
         }

@@ -1,10 +1,13 @@
 import React from "react";
 import { View, Text, StyleSheet } from "react-native";
+import { Image } from "expo-image";
 
 interface RoomWaypoint {
   id: string;
   label: string | null;
   scanned: boolean;
+  /** Preview image URL for last-angle mode */
+  previewUrl?: string | null;
 }
 
 interface Props {
@@ -71,7 +74,29 @@ export default function CoverageTracker({
         </Text>
       )}
 
-      {pendingWaypoints.length > 0 && (
+      {/* Last-angle mode: when 1 effective angle remains, show preview thumbnail */}
+      {pendingWaypoints.length === 1 && pendingWaypoints[0].previewUrl && (
+        <View style={styles.lastAngleRow}>
+          <Image
+            source={{ uri: pendingWaypoints[0].previewUrl }}
+            style={styles.lastAnglePreview}
+            contentFit="cover"
+            cachePolicy="memory-disk"
+          />
+          <View style={styles.lastAngleTextCol}>
+            <Text style={styles.sectionLabel}>Still needed</Text>
+            <Text style={styles.lastAngleLabel} numberOfLines={2}>
+              {pendingWaypoints[0].label || "1 remaining view"}
+            </Text>
+            <Text style={styles.lastAngleHint}>
+              Point camera at this area
+            </Text>
+          </View>
+        </View>
+      )}
+
+      {/* Multiple remaining: show dot list */}
+      {pendingWaypoints.length > 1 && (
         <>
           <Text style={styles.sectionLabel}>Still needed</Text>
           <View style={styles.waypointsRow}>
@@ -85,6 +110,19 @@ export default function CoverageTracker({
                 ) : null}
               </View>
             ))}
+          </View>
+        </>
+      )}
+
+      {/* Single remaining without preview: simple text */}
+      {pendingWaypoints.length === 1 && !pendingWaypoints[0].previewUrl && (
+        <>
+          <Text style={styles.sectionLabel}>Still needed</Text>
+          <View style={styles.waypointItem}>
+            <View style={[styles.dot, styles.dotPending]} />
+            <Text style={styles.dotLabel} numberOfLines={2}>
+              {pendingWaypoints[0].label || "1 remaining view"}
+            </Text>
           </View>
         </>
       )}
@@ -208,5 +246,32 @@ const styles = StyleSheet.create({
     gap: 6,
     flexWrap: "wrap",
     flexShrink: 1,
+  },
+  lastAngleRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    paddingTop: 2,
+  },
+  lastAnglePreview: {
+    width: 56,
+    height: 56,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.2)",
+  },
+  lastAngleTextCol: {
+    flex: 1,
+    gap: 2,
+  },
+  lastAngleLabel: {
+    color: "rgba(255,255,255,0.85)",
+    fontSize: 13,
+    fontWeight: "600",
+  },
+  lastAngleHint: {
+    color: "rgba(255,255,255,0.5)",
+    fontSize: 11,
+    fontWeight: "400",
   },
 });
