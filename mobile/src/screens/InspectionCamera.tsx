@@ -373,7 +373,19 @@ export default function InspectionCameraScreen() {
     }
   }, [localizationState]);
 
+  const NOISY_HINTS = ["adjusting", "keep scanning", "try a slightly", "try again"];
+
   const showCaptureHint = useCallback((message: string) => {
+    // Suppress noisy/repetitive guidance when room is mostly or fully covered
+    const currentRoom = sessionRef.current?.getState().currentRoomId;
+    const roomCov = currentRoom ? roomDetectorRef.current?.getRoomCoverage(currentRoom) : null;
+    if (roomCov && roomCov.percentage >= 80) {
+      const lower = message.toLowerCase();
+      if (NOISY_HINTS.some(h => lower.includes(h))) {
+        return; // Don't show contradictory hints near completion
+      }
+    }
+
     setCaptureHint(message);
     if (captureHintTimerRef.current) {
       clearTimeout(captureHintTimerRef.current);
@@ -824,12 +836,7 @@ export default function InspectionCameraScreen() {
         }, 10_000);
       }
       if (status === "error") {
-        // Suppress noisy error hint when room is mostly complete
-        const currentRoom = sessionRef.current?.getState().currentRoomId;
-        const roomCov = currentRoom ? roomDetectorRef.current?.getRoomCoverage(currentRoom) : null;
-        if (!roomCov || roomCov.percentage < 80) {
-          showCaptureHint("Adjusting - keep scanning");
-        }
+        showCaptureHint("Adjusting - keep scanning");
         if (event?.comparisonId) {
           pendingAnalysesRef.current.delete(event.comparisonId);
           verifiedComparisonIdsRef.current.delete(event.comparisonId);
