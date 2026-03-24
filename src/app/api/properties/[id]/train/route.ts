@@ -512,6 +512,8 @@ export async function POST(
         const endIdx = Math.floor(
           ((i + 1) * imageUrls.length) / analysis.rooms.length,
         );
+        const insertedFallbackBaselines: Array<{ id: string; imageUrl: string }> =
+          [];
         for (let j = startIdx; j < endIdx && j < imageUrls.length; j++) {
           const fallbackUrl = imageUrls[j];
           const [inserted] = await db.insert(baselineImages).values({
@@ -522,8 +524,63 @@ export async function POST(
           }).returning({ id: baselineImages.id });
           if (inserted) {
             insertedBaselinesByUrl.push({ id: inserted.id, imageUrl: fallbackUrl });
+            insertedFallbackBaselines.push({
+              id: inserted.id,
+              imageUrl: fallbackUrl,
+            });
           }
           baselineCount++;
+        }
+
+        if (
+          Object.keys(roomImageClassifications).length > 0 &&
+          insertedFallbackBaselines.length > 0
+        ) {
+          for (const { id, imageUrl } of insertedFallbackBaselines) {
+            const classification = roomImageClassifications[imageUrl];
+            if (!classification?.type) continue;
+
+            const imageType = ([
+              "overview",
+              "detail",
+              "required_detail",
+              "standard",
+            ] as const).includes(
+              classification.type as
+                | "overview"
+                | "detail"
+                | "required_detail"
+                | "standard",
+            )
+              ? (classification.type as
+                  | "overview"
+                  | "detail"
+                  | "required_detail"
+                  | "standard")
+              : ("standard" as const);
+
+            let parentBaselineId: string | null = null;
+            if (
+              classification.parent_url &&
+              typeof classification.parent_url === "string"
+            ) {
+              const parent = insertedBaselinesByUrl.find(
+                (b) => b.imageUrl === classification.parent_url,
+              );
+              parentBaselineId = parent?.id ?? null;
+            }
+
+            await db
+              .update(baselineImages)
+              .set({
+                metadata: {
+                  imageType,
+                  parentBaselineId,
+                  detailSubject: classification.detail_subject || null,
+                },
+              })
+              .where(eq(baselineImages.id, id));
+          }
         }
       }
 

@@ -261,15 +261,22 @@ export class SessionManager {
   }
 
   /**
-   * Get overall property coverage (average across all rooms).
+   * Get overall property coverage weighted by total baseline angles.
+   * This keeps a 1-angle room from counting the same as a 10-angle room.
    */
   getOverallCoverage(): number {
     if (this.totalAnglesPerRoom.size === 0) return 0;
-    let total = 0;
-    for (const [roomId] of this.totalAnglesPerRoom) {
-      total += this.getRoomCoverage(roomId);
+
+    let totalAngles = 0;
+    let scannedAngles = 0;
+    for (const [roomId, roomTotal] of this.totalAnglesPerRoom) {
+      totalAngles += roomTotal;
+      const visit = this.state.visitedRooms.get(roomId);
+      scannedAngles += visit?.anglesScanned.size || 0;
     }
-    return total / this.totalAnglesPerRoom.size;
+
+    if (totalAngles === 0) return 0;
+    return (scannedAngles / totalAngles) * 100;
   }
 
   /**

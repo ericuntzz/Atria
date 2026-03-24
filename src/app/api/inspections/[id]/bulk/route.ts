@@ -324,6 +324,8 @@ export async function POST(
     (sum, r) => sum + (r.findings?.length || 0),
     0,
   );
+  const visitedRoomCount = new Set(roomResults.map((result) => result.roomId))
+    .size;
   await emitEventSafe({
     eventType: "InspectionCompleted",
     aggregateId: id,
@@ -332,7 +334,7 @@ export async function POST(
     payload: {
       completionTier: (validatedTier || "minimum") as "minimum" | "standard" | "thorough",
       overallScore: overallScore ?? 0,
-      roomsVisited: roomResults.length,
+      roomsVisited: visitedRoomCount,
       totalRooms: propertyRooms.length,
       durationMs: 0,
       findingsCount: totalFindings,

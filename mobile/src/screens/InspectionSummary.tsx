@@ -229,13 +229,16 @@ function mapInspectionToSummary(payload: {
   });
 
   const allFindings = summaryRooms.flatMap((room) => room.findings);
-  const roomCoverageAverage =
-    summaryRooms.length > 0
-      ? Math.round(
-          summaryRooms.reduce((sum, room) => sum + room.coverage, 0) /
-            summaryRooms.length,
-        )
-      : 0;
+  const totalAngles = summaryRooms.reduce(
+    (sum, room) => sum + room.anglesTotal,
+    0,
+  );
+  const totalScannedAngles = summaryRooms.reduce(
+    (sum, room) => sum + room.anglesScanned,
+    0,
+  );
+  const overallCoverage =
+    totalAngles > 0 ? Math.round((totalScannedAngles / totalAngles) * 100) : 0;
   const startedAt = payload.startedAt ? new Date(payload.startedAt).getTime() : null;
   const completedAt = payload.completedAt ? new Date(payload.completedAt).getTime() : null;
   const durationMs =
@@ -246,7 +249,7 @@ function mapInspectionToSummary(payload: {
   return {
     overallScore: payload.readinessScore ?? null,
     completionTier: payload.completionTier || "minimum",
-    overallCoverage: roomCoverageAverage,
+    overallCoverage,
     durationMs,
     inspectionMode: payload.inspectionMode || "turnover",
     rooms: summaryRooms,
