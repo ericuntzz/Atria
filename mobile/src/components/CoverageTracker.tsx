@@ -15,32 +15,8 @@ interface Props {
   roomTotalCount?: number;
 }
 
-/**
- * Strip the room name prefix from a waypoint label so only the distinguishing
- * part is shown. "Home Office/Exercise Room view 3" → "view 3".
- * If the label doesn't start with the room name, return it as-is.
- */
-function shortenWaypointLabel(label: string, roomName?: string): string {
-  if (!roomName) return label;
-  // Try exact prefix match with common separators
-  for (const sep of [" - ", ": ", " – ", " "]) {
-    const prefix = roomName + sep;
-    if (label.startsWith(prefix)) {
-      const short = label.slice(prefix.length).trim();
-      if (short.length > 0) return short;
-    }
-  }
-  // Try just removing the room name if it's a prefix
-  if (label.startsWith(roomName)) {
-    const short = label.slice(roomName.length).trim();
-    if (short.length > 0) return short;
-  }
-  return label;
-}
-
 export default function CoverageTracker({
   coverage,
-  currentRoomName,
   roomWaypoints,
   roomScannedCount,
   roomTotalCount,
@@ -63,6 +39,9 @@ export default function CoverageTracker({
       : roomWaypoints?.length ?? 0;
   const roomCoverage =
     totalCount > 0 ? Math.round((scannedCount / totalCount) * 100) : null;
+  const remainingCount = Math.max(totalCount - scannedCount, 0);
+  const pendingWaypoints = roomWaypoints?.filter((wp) => !wp.scanned) ?? [];
+  const capturedWaypoints = roomWaypoints?.filter((wp) => wp.scanned) ?? [];
 
   return (
     <View style={styles.container}>
@@ -88,44 +67,38 @@ export default function CoverageTracker({
         <Text style={styles.roomProgressText} numberOfLines={2}>
           {scannedCount}/{totalCount} angles
           {roomCoverage !== null ? ` (${roomCoverage}%)` : ""}
+          {remainingCount > 0 ? ` - ${remainingCount} left` : ""}
         </Text>
       )}
 
-      {/* Waypoint dots — uncaptured first so user sees what's remaining */}
-      {roomWaypoints && roomWaypoints.length > 0 && (
-        <View style={styles.waypointsRow}>
-          {[...roomWaypoints]
-            .sort((a, b) => {
-              // Uncaptured first, then captured
-              if (a.scanned !== b.scanned) return a.scanned ? 1 : -1;
-              return 0;
-            })
-            .map((wp) => {
-              const shortLabel = wp.label
-                ? shortenWaypointLabel(wp.label, currentRoomName)
-                : null;
-              return (
-                <View key={wp.id} style={styles.waypointItem}>
-                  <View
-                    style={[
-                      styles.dot,
-                      wp.scanned ? styles.dotScanned : styles.dotPending,
-                    ]}
-                  />
-                  {shortLabel && (
-                    <Text
-                      style={[
-                        styles.dotLabel,
-                        wp.scanned && styles.dotLabelScanned,
-                      ]}
-                      numberOfLines={1}
-                    >
-                      {shortLabel}
-                    </Text>
-                  )}
-                </View>
-              );
-            })}
+      {pendingWaypoints.length > 0 && (
+        <>
+          <Text style={styles.sectionLabel}>Still needed</Text>
+          <View style={styles.waypointsRow}>
+            {pendingWaypoints.map((wp) => (
+              <View key={wp.id} style={styles.waypointItem}>
+                <View style={[styles.dot, styles.dotPending]} />
+                {wp.label ? (
+                  <Text style={styles.dotLabel} numberOfLines={2}>
+                    {wp.label}
+                  </Text>
+                ) : null}
+              </View>
+            ))}
+          </View>
+        </>
+      )}
+
+      {capturedWaypoints.length > 0 && (
+        <View style={styles.capturedSummaryRow}>
+          <Text style={styles.capturedSummaryText}>
+            Captured {capturedWaypoints.length}
+          </Text>
+          <View style={styles.capturedDotsRow}>
+            {capturedWaypoints.map((wp) => (
+              <View key={wp.id} style={[styles.dot, styles.dotScanned]} />
+            ))}
+          </View>
         </View>
       )}
     </View>
@@ -173,23 +146,32 @@ const styles = StyleSheet.create({
     fontWeight: "500",
     lineHeight: 17,
   },
+  sectionLabel: {
+    color: "rgba(255,255,255,0.72)",
+    fontSize: 10,
+    fontWeight: "700",
+    letterSpacing: 0.8,
+    textTransform: "uppercase",
+  },
   waypointsRow: {
     flexDirection: "row",
-    alignItems: "center",
+    alignItems: "flex-start",
     gap: 10,
     flexWrap: "wrap",
     paddingTop: 2,
   },
   waypointItem: {
     flexDirection: "row",
-    alignItems: "center",
+    alignItems: "flex-start",
     gap: 4,
     maxWidth: "48%",
+    minWidth: "48%",
   },
   dot: {
     width: 7,
     height: 7,
     borderRadius: 4,
+    marginTop: 4,
   },
   dotScanned: {
     backgroundColor: "#22c55e",
@@ -205,5 +187,26 @@ const styles = StyleSheet.create({
   },
   dotLabelScanned: {
     color: "rgba(34,197,94,0.7)",
+  },
+  capturedSummaryRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    paddingTop: 2,
+    flexWrap: "wrap",
+  },
+  capturedSummaryText: {
+    color: "rgba(34,197,94,0.7)",
+    fontSize: 10,
+    fontWeight: "700",
+    letterSpacing: 0.8,
+    textTransform: "uppercase",
+  },
+  capturedDotsRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    flexWrap: "wrap",
+    flexShrink: 1,
   },
 });

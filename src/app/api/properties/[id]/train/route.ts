@@ -459,11 +459,20 @@ export async function POST(
         if (!isSafeUrl(imgUrl)) continue;
         const labelFromAi =
           typeof roomImageLabels[imgUrl] === "string" ? roomImageLabels[imgUrl] : null;
+        const classification =
+          roomImageClassifications && typeof roomImageClassifications === "object"
+            ? roomImageClassifications[imgUrl]
+            : null;
+        const detailSubjectFallback =
+          typeof classification?.detail_subject === "string"
+            ? classification.detail_subject
+            : null;
         const [inserted] = await db.insert(baselineImages).values({
           roomId: newRoom.id,
           imageUrl: imgUrl,
           label:
             labelFromAi?.trim().slice(0, 100) ||
+            detailSubjectFallback?.trim().slice(0, 100) ||
             `${roomName} view ${baselineCount + 1}`,
           isActive: true,
         }).returning({ id: baselineImages.id });
@@ -516,10 +525,20 @@ export async function POST(
           [];
         for (let j = startIdx; j < endIdx && j < imageUrls.length; j++) {
           const fallbackUrl = imageUrls[j];
+          const classification =
+            roomImageClassifications && typeof roomImageClassifications === "object"
+              ? roomImageClassifications[fallbackUrl]
+              : null;
+          const detailSubjectFallback =
+            typeof classification?.detail_subject === "string"
+              ? classification.detail_subject
+              : null;
           const [inserted] = await db.insert(baselineImages).values({
             roomId: newRoom.id,
             imageUrl: fallbackUrl,
-            label: `${roomName} view ${j - startIdx + 1}`,
+            label:
+              detailSubjectFallback?.trim().slice(0, 100) ||
+              `${roomName} view ${j - startIdx + 1}`,
             isActive: true,
           }).returning({ id: baselineImages.id });
           if (inserted) {
