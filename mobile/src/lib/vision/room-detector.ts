@@ -100,12 +100,13 @@ function cosineSimilarity(a: number[], b: number[]): number {
   return denom === 0 ? 0 : dot / denom;
 }
 
-/** Similarity threshold for clustering nearby baselines within the same room */
-// Lowered from 0.75 to group wide-angle and medium-angle views of the same area.
-// Close-ups and wide shots of the same subject have ~0.4-0.6 embedding similarity;
-// 0.55 catches these while avoiding cross-room false clusters. required_detail
-// baselines are intentionally excluded from clustering so they remain separately required.
-const CLUSTER_SIMILARITY_THRESHOLD = 0.55;
+/** Similarity threshold for clustering nearby baselines within the same room.
+ *  0.70 groups genuinely similar angles (same area, slightly different framing)
+ *  without collapsing wide shots with close-ups (~0.4-0.6 similarity).
+ *  required_detail baselines are excluded from clustering entirely. */
+const CLUSTER_SIMILARITY_THRESHOLD = 0.70;
+/** Max baselines per cluster. Prevents one cluster from swallowing an entire room. */
+const MAX_CLUSTER_SIZE = 3;
 
 export class RoomDetector {
   private baselines: BaselineAngle[] = [];
@@ -268,7 +269,17 @@ export class RoomDetector {
         if (ra !== rb) parent.set(ra, rb);
       };
 
-      // Pairwise similarity check
+      // Track cluster sizes to enforce MAX_CLUSTER_SIZE
+      const clusterSize = new Map<string, number>();
+      for (const b of roomBaselines) clusterSize.set(b.id, 1);
+
+      const getSize = (id: string) => {
+        const root = find(id);
+        return clusterSize.get(root) || 1;
+      };
+
+      // Pairwise similarity check (sorted by descending similarity for best merges first)
+      const pairs: { i: number; j: number; sim: number }[] = [];
       for (let i = 0; i < roomBaselines.length; i++) {
         for (let j = i + 1; j < roomBaselines.length; j++) {
           const sim = cosineSimilarity(
@@ -276,9 +287,21 @@ export class RoomDetector {
             roomBaselines[j].embedding!,
           );
           if (sim >= CLUSTER_SIMILARITY_THRESHOLD) {
-            union(roomBaselines[i].id, roomBaselines[j].id);
+            pairs.push({ i, j, sim });
           }
         }
+      }
+      pairs.sort((a, b) => b.sim - a.sim);
+
+      for (const { i, j } of pairs) {
+        const ra = find(roomBaselines[i].id);
+        const rb = find(roomBaselines[j].id);
+        if (ra === rb) continue; // already same cluster
+        const mergedSize = (clusterSize.get(ra) || 1) + (clusterSize.get(rb) || 1);
+        if (mergedSize > MAX_CLUSTER_SIZE) continue; // would exceed cap
+        union(roomBaselines[i].id, roomBaselines[j].id);
+        const newRoot = find(roomBaselines[i].id);
+        clusterSize.set(newRoot, mergedSize);
       }
 
       // Collect clusters
