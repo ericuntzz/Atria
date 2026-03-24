@@ -108,6 +108,39 @@ const CLUSTER_SIMILARITY_THRESHOLD = 0.70;
 /** Max baselines per cluster. Prevents one cluster from swallowing an entire room. */
 const MAX_CLUSTER_SIZE = 3;
 
+function canClusterBaselines(a: BaselineAngle, b: BaselineAngle): boolean {
+  const aType = a.metadata?.imageType;
+  const bType = b.metadata?.imageType;
+
+  if (aType === "required_detail" || bType === "required_detail") {
+    return false;
+  }
+
+  // Explicit parent/child relationships are handled separately by hierarchy credit.
+  if (
+    a.metadata?.parentBaselineId === b.id ||
+    b.metadata?.parentBaselineId === a.id
+  ) {
+    return false;
+  }
+
+  const aExplicitType = aType && aType !== "standard";
+  const bExplicitType = bType && bType !== "standard";
+
+  // If the trainer explicitly typed both images, only cluster peer views of the same kind.
+  if (aExplicitType && bExplicitType && aType !== bType) {
+    return false;
+  }
+
+  // If only one side has explicit overview/detail typing, be conservative and
+  // let hierarchy or direct matching handle it instead of similarity clustering.
+  if (aExplicitType !== bExplicitType) {
+    return false;
+  }
+
+  return true;
+}
+
 export class RoomDetector {
   private baselines: BaselineAngle[] = [];
   private config: RoomDetectorConfig;
@@ -282,6 +315,9 @@ export class RoomDetector {
       const pairs: { i: number; j: number; sim: number }[] = [];
       for (let i = 0; i < roomBaselines.length; i++) {
         for (let j = i + 1; j < roomBaselines.length; j++) {
+          if (!canClusterBaselines(roomBaselines[i], roomBaselines[j])) {
+            continue;
+          }
           const sim = cosineSimilarity(
             roomBaselines[i].embedding!,
             roomBaselines[j].embedding!,
