@@ -267,9 +267,10 @@ export async function POST(request: NextRequest) {
         ),
       );
 
+      let comparisonId: string | null = null;
       try {
         const compareStartedAt = Date.now();
-        const comparisonId = crypto.randomUUID();
+        comparisonId = crypto.randomUUID();
 
         if (inspectionId && roomId && baselineImageId) {
           await emitEventSafe({
@@ -402,7 +403,7 @@ export async function POST(request: NextRequest) {
         console.error("[compare-stream] Comparison failed:", streamErr);
         controller.enqueue(
           encoder.encode(
-            `event: error\ndata: ${JSON.stringify({ error: "Comparison failed" })}\n\n`,
+            `event: error\ndata: ${JSON.stringify({ comparisonId, error: "Comparison failed" })}\n\n`,
           ),
         );
       }

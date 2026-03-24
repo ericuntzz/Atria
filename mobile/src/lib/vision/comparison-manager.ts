@@ -93,6 +93,11 @@ export interface VerifiedEvent {
   diagnostics?: Record<string, unknown>;
 }
 
+export interface ComparisonErrorEvent {
+  comparisonId?: string;
+  error?: string;
+}
+
 type ComparisonCallback = (
   result: ComparisonResult,
   context: ComparisonContext,
@@ -101,7 +106,10 @@ type VerifiedCallback = (
   event: VerifiedEvent,
   context: ComparisonContext,
 ) => void;
-type StatusCallback = (status: "processing" | "complete" | "error") => void;
+type StatusCallback = (
+  status: "processing" | "complete" | "error",
+  event?: ComparisonErrorEvent,
+) => void;
 
 /** Capture function signature — captures a single frame, returns base64 data URI */
 type CaptureFrameFn = () => Promise<string | null>;
@@ -507,9 +515,18 @@ export class ComparisonManager {
     }
 
     if (typeMatch?.[1] === "error") {
+      if (isStale()) return "error";
       console.warn("[ComparisonManager] Server returned SSE error event");
+      let errorEvent: ComparisonErrorEvent | undefined;
+      if (dataPayload) {
+        try {
+          errorEvent = JSON.parse(dataPayload) as ComparisonErrorEvent;
+        } catch (parseErr) {
+          console.warn("[ComparisonManager] Failed to parse SSE error:", parseErr);
+        }
+      }
       this.consecutiveFailures++;
-      this.onStatus?.("error");
+      this.onStatus?.("error", errorEvent);
       return "error";
     }
 

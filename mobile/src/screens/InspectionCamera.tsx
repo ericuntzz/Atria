@@ -698,7 +698,7 @@ export default function InspectionCameraScreen() {
 
     let activeProcessingCount = 0;
     let processingTimeoutId: ReturnType<typeof setTimeout> | null = null;
-    comparison.onStatusChange((status) => {
+    comparison.onStatusChange((status, event) => {
       if (!isMountedRef.current) return;
 
       // Ref-counted processing: supports maxConcurrent > 1
@@ -726,12 +726,17 @@ export default function InspectionCameraScreen() {
       }
       if (status === "error") {
         showCaptureHint("That angle could not be analyzed. Try again.");
-        // Clean up any stale pending entries since error events don't carry comparisonId
-        const now = Date.now();
-        for (const [id, entry] of pendingAnalysesRef.current) {
-          if (now - entry.startedAt > 10_000) {
-            pendingAnalysesRef.current.delete(id);
-            verifiedComparisonIdsRef.current.delete(id);
+        if (event?.comparisonId) {
+          pendingAnalysesRef.current.delete(event.comparisonId);
+          verifiedComparisonIdsRef.current.delete(event.comparisonId);
+        } else {
+          // Fallback cleanup for older servers that don't include comparisonId on error.
+          const now = Date.now();
+          for (const [id, entry] of pendingAnalysesRef.current) {
+            if (now - entry.startedAt > 10_000) {
+              pendingAnalysesRef.current.delete(id);
+              verifiedComparisonIdsRef.current.delete(id);
+            }
           }
         }
       }
