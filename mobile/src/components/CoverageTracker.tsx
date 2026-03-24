@@ -15,6 +15,29 @@ interface Props {
   roomTotalCount?: number;
 }
 
+/**
+ * Strip the room name prefix from a waypoint label so only the distinguishing
+ * part is shown. "Home Office/Exercise Room view 3" → "view 3".
+ * If the label doesn't start with the room name, return it as-is.
+ */
+function shortenWaypointLabel(label: string, roomName?: string): string {
+  if (!roomName) return label;
+  // Try exact prefix match with common separators
+  for (const sep of [" - ", ": ", " – ", " "]) {
+    const prefix = roomName + sep;
+    if (label.startsWith(prefix)) {
+      const short = label.slice(prefix.length).trim();
+      if (short.length > 0) return short;
+    }
+  }
+  // Try just removing the room name if it's a prefix
+  if (label.startsWith(roomName)) {
+    const short = label.slice(roomName.length).trim();
+    if (short.length > 0) return short;
+  }
+  return label;
+}
+
 export default function CoverageTracker({
   coverage,
   currentRoomName,
@@ -68,30 +91,41 @@ export default function CoverageTracker({
         </Text>
       )}
 
-      {/* Waypoint dots (when room has baselines) */}
+      {/* Waypoint dots — uncaptured first so user sees what's remaining */}
       {roomWaypoints && roomWaypoints.length > 0 && (
         <View style={styles.waypointsRow}>
-          {roomWaypoints.map((wp) => (
-            <View key={wp.id} style={styles.waypointItem}>
-              <View
-                style={[
-                  styles.dot,
-                  wp.scanned ? styles.dotScanned : styles.dotPending,
-                ]}
-              />
-              {wp.label && (
-                <Text
-                  style={[
-                    styles.dotLabel,
-                    wp.scanned && styles.dotLabelScanned,
-                  ]}
-                  numberOfLines={1}
-                >
-                  {wp.label}
-                </Text>
-              )}
-            </View>
-          ))}
+          {[...roomWaypoints]
+            .sort((a, b) => {
+              // Uncaptured first, then captured
+              if (a.scanned !== b.scanned) return a.scanned ? 1 : -1;
+              return 0;
+            })
+            .map((wp) => {
+              const shortLabel = wp.label
+                ? shortenWaypointLabel(wp.label, currentRoomName)
+                : null;
+              return (
+                <View key={wp.id} style={styles.waypointItem}>
+                  <View
+                    style={[
+                      styles.dot,
+                      wp.scanned ? styles.dotScanned : styles.dotPending,
+                    ]}
+                  />
+                  {shortLabel && (
+                    <Text
+                      style={[
+                        styles.dotLabel,
+                        wp.scanned && styles.dotLabelScanned,
+                      ]}
+                      numberOfLines={1}
+                    >
+                      {shortLabel}
+                    </Text>
+                  )}
+                </View>
+              );
+            })}
         </View>
       )}
     </View>
@@ -161,15 +195,15 @@ const styles = StyleSheet.create({
     backgroundColor: "#22c55e",
   },
   dotPending: {
-    backgroundColor: "rgba(255,255,255,0.2)",
+    backgroundColor: "rgba(255,255,255,0.4)",
   },
   dotLabel: {
-    color: "rgba(255,255,255,0.35)",
+    color: "rgba(255,255,255,0.6)",
     fontSize: 11,
     fontWeight: "500",
     flexShrink: 1,
   },
   dotLabelScanned: {
-    color: "rgba(34,197,94,0.8)",
+    color: "rgba(34,197,94,0.7)",
   },
 });

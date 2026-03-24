@@ -1329,8 +1329,13 @@ export default function InspectionCameraScreen() {
                   const roomProgress = detector.getRoomProgress(bRoomId);
                   const scannedCount = roomProgress.scanned;
                   const totalAngles = roomProgress.total || 1;
-                  const label = locked.baseline.label || "View";
-                  showCaptureHint(`${label} captured (${scannedCount}/${totalAngles})`);
+                  const rawLabel = locked.baseline.label || "View";
+                  // Strip room name prefix for a cleaner hint (e.g., "view 6" not "Home Office/Exercise Room view 6")
+                  const roomName = locked.baseline.roomName || "";
+                  const shortLabel = roomName && rawLabel.startsWith(roomName)
+                    ? rawLabel.slice(roomName.length).trim() || rawLabel
+                    : rawLabel;
+                  showCaptureHint(`${shortLabel} captured (${scannedCount}/${totalAngles})`);
                   void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
                   autoAdvanceIfRoomComplete(session, bRoomId);
                 }
