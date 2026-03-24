@@ -101,12 +101,13 @@ function cosineSimilarity(a: number[], b: number[]): number {
 }
 
 /** Similarity threshold for clustering nearby baselines within the same room.
- *  0.70 groups genuinely similar angles (same area, slightly different framing)
- *  without collapsing wide shots with close-ups (~0.4-0.6 similarity).
+ *  0.85 only groups near-identical angles (same spot, minor framing shift).
+ *  Same-room photos from different angles typically score 0.6-0.8 with MobileCLIP,
+ *  so 0.85 avoids collapsing distinct viewpoints.
  *  required_detail baselines are excluded from clustering entirely. */
-const CLUSTER_SIMILARITY_THRESHOLD = 0.70;
-/** Max baselines per cluster. Prevents one cluster from swallowing an entire room. */
-const MAX_CLUSTER_SIZE = 3;
+const CLUSTER_SIMILARITY_THRESHOLD = 0.85;
+/** Max baselines per cluster. Prevents any cluster from reducing angle count too much. */
+const MAX_CLUSTER_SIZE = 2;
 
 function canClusterBaselines(a: BaselineAngle, b: BaselineAngle): boolean {
   const aType = a.metadata?.imageType;
