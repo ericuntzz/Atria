@@ -83,10 +83,14 @@ const LOCALIZATION_AUTO_CAPTURE_THRESHOLD = 0.55;
 const LOCALIZATION_AMBIGUITY_GAP = 0.04;
 const LOCALIZATION_OVERLAY_GRACE_MS = 1400;
 const LOCALIZATION_ROOM_SYNC_THRESHOLD = 0.68;
-/** On-device coverage credit: grant when embedding similarity exceeds this.
- *  No server round-trip needed — ONNX embedding match is sufficient for coverage.
- *  Matches LOCALIZATION_LOCKED_THRESHOLD — if locked, grant credit. */
-const ON_DEVICE_COVERAGE_THRESHOLD = 0.50;
+/** On-device coverage credit thresholds.
+ *  FIRST_MATCH: Lower threshold to acquire initial foothold faster.
+ *  Once any baseline is matched, tighten to NORMAL to avoid false positives.
+ *  ROOM_CONFIRMED: When room detection is confident, we know the user is
+ *  in the right place, so accept weaker baseline matches within that room. */
+const ON_DEVICE_COVERAGE_THRESHOLD_FIRST_MATCH = 0.42;
+const ON_DEVICE_COVERAGE_THRESHOLD_NORMAL = 0.48;
+const ON_DEVICE_COVERAGE_THRESHOLD_ROOM_CONFIRMED = 0.44;
 const AUTO_CAPTURE_INTERVAL_MS = 500;
 
 type LocalizationState =
@@ -103,21 +107,37 @@ function getSimilarityColor(similarity: number): string {
   return "#ef4444"; // red
 }
 
-function getLocalizationGuidance(state: LocalizationState, stuckSince: number | null): string | null {
+function getLocalizationGuidance(
+  state: LocalizationState,
+  stuckSince: number | null,
+  similarity?: number,
+): string | null {
   const stuckMs = stuckSince ? Date.now() - stuckSince : 0;
   switch (state) {
     case "not_localized":
+      // If we have some similarity signal, user is in a trained area but not matching well
+      if (similarity !== undefined && similarity >= 0.30) {
+        return stuckMs > 6000
+          ? "Try pointing directly at items you trained"
+          : "Getting closer — hold steady briefly";
+      }
       return stuckMs > 10000
         ? "Try pointing at a distinctive area you trained"
         : "Point camera at a trained area";
-    case "localizing": return "Keep the camera on this area";
+    case "localizing":
+      return similarity !== undefined && similarity >= 0.40
+        ? "Almost there — keep steady"
+        : "Keep the camera on this area";
     case "ambiguous":
       return stuckMs > 8000
         ? "Tap a view below to capture it directly"
         : "Move closer to distinguish views";
     case "localized": return null;
     case "capturing": return "Analyzing...";
-    case "verification_failed": return "Try a slightly different angle";
+    case "verification_failed":
+      return stuckMs > 5000
+        ? "Try moving closer or pointing at key items"
+        : "Adjusting — keep scanning";
   }
 }
 
@@ -266,6 +286,8 @@ export default function InspectionCameraScreen() {
   const verifiedComparisonIdsRef = useRef<Set<string>>(new Set());
   /** Tracks baselines that already received on-device coverage credit (embedding-only, no server) */
   const onDeviceCreditedRef = useRef<Set<string>>(new Set());
+  /** Whether any baseline has been matched yet this session. Used for first-match boost. */
+  const hasFirstMatchRef = useRef(false);
 
   useEffect(() => {
     autoCaptureEnabledRef.current = autoCaptureEnabled;
@@ -610,9 +632,15 @@ export default function InspectionCameraScreen() {
         }
 
         setLocalizationState("verification_failed");
-        setShowTargetAssist(true);
-        showCaptureHint(result.userGuidance || "Try a slightly different angle");
-        void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
+        // Only show target assist after repeated failures, not on the first miss
+        if (newCount >= 2) {
+          setShowTargetAssist(true);
+        }
+        // Softer message — the user is trying, don't make them feel like they're doing it wrong
+        const hint = newCount >= 2
+          ? "Tap a suggested view below, or try moving closer"
+          : "Adjusting — keep scanning";
+        showCaptureHint(hint);
         return;
       }
 
@@ -1211,8 +1239,19 @@ export default function InspectionCameraScreen() {
                 ? topK[0].similarity - topK[1].similarity
                 : 1;
               const isSingleRoom = baselinesRef.current.length <= 1;
+
+              // Dynamic threshold: easier first match, tighter after foothold established.
+              // If room detection is confident (room locked), also lower the bar since
+              // we know the user is in the right place.
+              const roomIsConfident = detector.getCurrentRoom() !== null;
+              const onDeviceThreshold = !hasFirstMatchRef.current
+                ? ON_DEVICE_COVERAGE_THRESHOLD_FIRST_MATCH
+                : roomIsConfident
+                  ? ON_DEVICE_COVERAGE_THRESHOLD_ROOM_CONFIRMED
+                  : ON_DEVICE_COVERAGE_THRESHOLD_NORMAL;
+
               const highConfidenceWalkingMatch =
-                locked.similarity >= ON_DEVICE_COVERAGE_THRESHOLD &&
+                locked.similarity >= onDeviceThreshold &&
                 (isSingleRoom || gap >= LOCALIZATION_AMBIGUITY_GAP);
 
               if (locked.similarity < LOCALIZATION_NOT_READY_THRESHOLD) {
@@ -1233,6 +1272,7 @@ export default function InspectionCameraScreen() {
                   const baselineId = locked.baseline.id;
                   const bRoomId = locked.baseline.roomId;
                   onDeviceCreditedRef.current.add(baselineId);
+                  hasFirstMatchRef.current = true;
 
                   // Completion credit: matched baseline + cluster peers only
                   const clusterIds = detector.getClusterMembers(baselineId) || [baselineId];
@@ -2451,7 +2491,7 @@ export default function InspectionCameraScreen() {
           <Text style={styles.localizationGuideText}>
             {localizationState === "not_localized" && autoDetectUnavailableReason
               ? autoDetectUnavailableReason
-              : getLocalizationGuidance(localizationState, localizationStuckSince)}
+              : getLocalizationGuidance(localizationState, localizationStuckSince, lockedBaselineInfo?.similarity)}
           </Text>
         </View>
       )}
