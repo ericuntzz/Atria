@@ -225,7 +225,17 @@ Return ONLY valid JSON with this exact structure:
   const rawText = labelData.content?.[0]?.text || "";
   const start = rawText.indexOf("{");
   const end = rawText.lastIndexOf("}") + 1;
-  const parsed = JSON.parse(rawText.substring(start, end));
+  if (start === -1 || end <= start) {
+    console.warn("[train] Label refinement: no JSON found in response");
+    return;
+  }
+  let parsed: { labels?: Record<string, string> };
+  try {
+    parsed = JSON.parse(rawText.substring(start, end));
+  } catch {
+    console.warn("[train] Label refinement: failed to parse response JSON");
+    return;
+  }
   const refinedLabels = parsed?.labels || {};
 
   let updated = 0;
