@@ -1,5 +1,5 @@
-import React from "react";
-import { View, Text, StyleSheet } from "react-native";
+import React, { useState } from "react";
+import { View, Text, StyleSheet, TouchableOpacity, Modal } from "react-native";
 import { Image } from "expo-image";
 
 interface RoomWaypoint {
@@ -24,6 +24,7 @@ export default function CoverageTracker({
   roomScannedCount,
   roomTotalCount,
 }: Props) {
+  const [expandedPreviewUrl, setExpandedPreviewUrl] = useState<string | null>(null);
   const clampedCoverage = Math.min(100, Math.max(0, coverage));
   const barColor =
     clampedCoverage >= 90
@@ -87,9 +88,15 @@ export default function CoverageTracker({
         </Text>
       ) : null}
 
-      {/* Last-angle mode: when 1 effective angle remains, show preview thumbnail */}
+      {/* Last-angle mode: when 1 effective angle remains, show tappable preview */}
       {pendingWaypoints.length === 1 && pendingWaypoints[0].previewUrl && (
-        <View style={styles.lastAngleRow}>
+        <TouchableOpacity
+          style={styles.lastAngleRow}
+          activeOpacity={0.7}
+          onPress={() => setExpandedPreviewUrl(pendingWaypoints[0].previewUrl!)}
+          accessibilityLabel="Tap to expand reference image"
+          accessibilityRole="button"
+        >
           <Image
             source={{ uri: pendingWaypoints[0].previewUrl }}
             style={styles.lastAnglePreview}
@@ -102,10 +109,10 @@ export default function CoverageTracker({
               {pendingWaypoints[0].label || "1 remaining view"}
             </Text>
             <Text style={styles.lastAngleHint}>
-              Point the camera at this area next
+              Tap to see full reference image
             </Text>
           </View>
-        </View>
+        </TouchableOpacity>
       )}
 
       {/* Multiple remaining: show dot list */}
@@ -146,6 +153,41 @@ export default function CoverageTracker({
           </View>
         </>
       )}
+
+      {/* Expanded preview modal — full-screen reference image */}
+      <Modal
+        visible={!!expandedPreviewUrl}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setExpandedPreviewUrl(null)}
+      >
+        <TouchableOpacity
+          style={styles.previewModalOverlay}
+          activeOpacity={1}
+          onPress={() => setExpandedPreviewUrl(null)}
+        >
+          <View style={styles.previewModalContent}>
+            <Text style={styles.previewModalTitle}>Reference Image</Text>
+            <Text style={styles.previewModalSubtitle}>
+              Point your camera at this area to capture
+            </Text>
+            {expandedPreviewUrl && (
+              <Image
+                source={{ uri: expandedPreviewUrl }}
+                style={styles.previewModalImage}
+                contentFit="contain"
+                cachePolicy="memory-disk"
+              />
+            )}
+            <TouchableOpacity
+              style={styles.previewModalClose}
+              onPress={() => setExpandedPreviewUrl(null)}
+            >
+              <Text style={styles.previewModalCloseText}>Close</Text>
+            </TouchableOpacity>
+          </View>
+        </TouchableOpacity>
+      </Modal>
 
       {capturedWaypoints.length > 0 && (
         <View style={styles.capturedSummaryRow}>
@@ -319,5 +361,47 @@ const styles = StyleSheet.create({
     color: "rgba(191,219,254,0.68)",
     fontSize: 11,
     fontWeight: "400",
+  },
+  previewModalOverlay: {
+    flex: 1,
+    backgroundColor: "rgba(0,0,0,0.85)",
+    justifyContent: "center",
+    alignItems: "center",
+    padding: 24,
+  },
+  previewModalContent: {
+    width: "100%",
+    maxWidth: 340,
+    alignItems: "center",
+    gap: 12,
+  },
+  previewModalTitle: {
+    color: "#fff",
+    fontSize: 18,
+    fontWeight: "700",
+  },
+  previewModalSubtitle: {
+    color: "rgba(255,255,255,0.6)",
+    fontSize: 14,
+    textAlign: "center",
+  },
+  previewModalImage: {
+    width: "100%",
+    aspectRatio: 4 / 3,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.15)",
+  },
+  previewModalClose: {
+    paddingHorizontal: 32,
+    paddingVertical: 12,
+    backgroundColor: "rgba(255,255,255,0.15)",
+    borderRadius: 10,
+    marginTop: 8,
+  },
+  previewModalCloseText: {
+    color: "#fff",
+    fontSize: 16,
+    fontWeight: "600",
   },
 });

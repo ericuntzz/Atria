@@ -1028,8 +1028,9 @@ export default function InspectionCameraScreen() {
           });
 
           // Update waypoint data for CoverageTracker
-          // Use detector's scannedAngles (includes hierarchy UI credit) for dot display
-          const detectorScanned = new Set(roomDetectorRef.current?.getScannedAngles(roomId) || []);
+          // Use completion-scanned angles so dots reflect what was actually captured,
+          // not hierarchy UI credit (which inflates the count confusingly)
+          const detectorScanned = new Set(roomDetectorRef.current?.getCompletionScannedAngles(roomId) || []);
           setRoomWaypoints(
             (roomBaselines.baselines || []).map((b, index) => ({
               id: b.id,

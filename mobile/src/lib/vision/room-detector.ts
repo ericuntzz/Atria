@@ -837,10 +837,18 @@ export class RoomDetector {
   }
 
   /**
-   * Get scanned angle IDs for a room.
+   * Get scanned angle IDs for a room (includes hierarchy UI-only credit).
    */
   getScannedAngles(roomId: string): string[] {
     return Array.from(this.scannedAngles.get(roomId) || []);
+  }
+
+  /**
+   * Get completion-scanned angle IDs for a room (only directly captured + cluster peers).
+   * Use this for waypoint display so users see accurate "what I actually captured" state.
+   */
+  getCompletionScannedAngles(roomId: string): string[] {
+    return Array.from(this.completionScannedAngles.get(roomId) || []);
   }
 
   /**
