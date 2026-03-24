@@ -288,6 +288,8 @@ export default function InspectionCameraScreen() {
   const onDeviceCreditedRef = useRef<Set<string>>(new Set());
   /** Whether any baseline has been matched yet this session. Used for first-match boost. */
   const hasFirstMatchRef = useRef(false);
+  /** Last room-confidence signal from the detector loop. */
+  const roomConfidenceRef = useRef(0);
 
   useEffect(() => {
     autoCaptureEnabledRef.current = autoCaptureEnabled;
@@ -529,6 +531,7 @@ export default function InspectionCameraScreen() {
 
       // Grant coverage credit (directional hierarchy rules apply)
       if (resolvedBaselineId) {
+        hasFirstMatchRef.current = true;
         if (event.verificationMode === "user_confirmed_bypass") {
           session.recordAngleScan(resolvedRoomId, resolvedBaselineId);
           roomDetectorRef.current?.markAngleScanned(resolvedBaselineId, resolvedRoomId);
@@ -675,6 +678,7 @@ export default function InspectionCameraScreen() {
       // Grant coverage credit ONLY if not already granted by verified event or on-device credit
       const onDeviceAlreadyCredited = resolvedBaselineId ? onDeviceCreditedRef.current.has(resolvedBaselineId) : false;
       if (resolvedBaselineId && !alreadyCredited && !onDeviceAlreadyCredited) {
+        hasFirstMatchRef.current = true;
         // Completion credit: matched baseline + cluster peers only
         const clusterIds = roomDetectorRef.current?.getClusterMembers(resolvedBaselineId) || [resolvedBaselineId];
         for (const cid of clusterIds) {
@@ -1207,6 +1211,7 @@ export default function InspectionCameraScreen() {
 
           if (photo?.uri) {
             const result = await detector.processFrameFromUri(photo.uri);
+            roomConfidenceRef.current = result?.room?.confidence ?? 0;
 
             // Clean up the temp photo file to avoid storage leak on long sessions
             FileSystem.deleteAsync(photo.uri, { idempotent: true }).catch(() => {});
@@ -1243,7 +1248,9 @@ export default function InspectionCameraScreen() {
               // Dynamic threshold: easier first match, tighter after foothold established.
               // If room detection is confident (room locked), also lower the bar since
               // we know the user is in the right place.
-              const roomIsConfident = detector.getCurrentRoom() !== null;
+              const roomIsConfident =
+                detector.getCurrentRoom() === locked.baseline.roomId &&
+                roomConfidenceRef.current >= LOCALIZATION_ROOM_SYNC_THRESHOLD;
               const onDeviceThreshold = !hasFirstMatchRef.current
                 ? ON_DEVICE_COVERAGE_THRESHOLD_FIRST_MATCH
                 : roomIsConfident
