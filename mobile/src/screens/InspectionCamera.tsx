@@ -84,8 +84,8 @@ const LOCALIZATION_OVERLAY_GRACE_MS = 1400;
 const LOCALIZATION_ROOM_SYNC_THRESHOLD = 0.68;
 /** On-device coverage credit: grant when embedding similarity exceeds this.
  *  No server round-trip needed — ONNX embedding match is sufficient for coverage.
- *  0.60 is conservative enough to avoid false matches but reachable during walking. */
-const ON_DEVICE_COVERAGE_THRESHOLD = 0.60;
+ *  Matches LOCALIZATION_LOCKED_THRESHOLD — if locked, grant credit. */
+const ON_DEVICE_COVERAGE_THRESHOLD = 0.50;
 const AUTO_CAPTURE_INTERVAL_MS = 500;
 
 type LocalizationState =
@@ -1182,10 +1182,10 @@ export default function InspectionCameraScreen() {
 
                 // On-device coverage credit: when embedding similarity is high enough,
                 // grant coverage immediately without waiting for server round-trip.
-                // This enables walking-pace inspection — ONNX match IS the verification.
+                // Don't require full lock (3 frames / ~1s) — a single high-similarity
+                // frame is enough during walking. The threshold already prevents false matches.
                 if (
                   locked.similarity >= ON_DEVICE_COVERAGE_THRESHOLD &&
-                  locked.isLocked &&
                   !onDeviceCreditedRef.current.has(locked.baseline.id)
                 ) {
                   const baselineId = locked.baseline.id;

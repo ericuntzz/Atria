@@ -76,8 +76,8 @@ export interface RoomDetectorConfig {
 const DEFAULT_CONFIG: RoomDetectorConfig = {
   roomThreshold: 0.68,
   angleThreshold: 0.85,
-  hysteresisFrames: 5,
-  baselineLockFrames: 3,
+  hysteresisFrames: 3,
+  baselineLockFrames: 2,
   crossRoomFallbackThreshold: 0.75,
   coverageTieBreakGap: 0.03,
   lockStickinessGap: 0.04,
