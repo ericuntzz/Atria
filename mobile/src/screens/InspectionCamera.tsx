@@ -302,6 +302,11 @@ export default function InspectionCameraScreen() {
   const verifiedComparisonIdsRef = useRef<Set<string>>(new Set());
   /** Tracks baselines that already received on-device coverage credit (embedding-only, no server) */
   const onDeviceCreditedRef = useRef<Set<string>>(new Set());
+  /** Anti-stacking: timestamp of last on-device credit grant + which baseline it was */
+  const lastOnDeviceCreditRef = useRef<{ baselineId: string; timestamp: number } | null>(null);
+  /** Minimum ms between consecutive on-device credits for DIFFERENT baselines.
+   *  Prevents one held camera position from farming multiple angles via embedding fluctuation. */
+  const ON_DEVICE_CREDIT_COOLDOWN_MS = 2000;
   /** Whether any baseline has been matched yet this session. Used for first-match boost. */
   const hasFirstMatchRef = useRef(false);
   /** Last room-confidence signal from the detector loop. */
@@ -1368,11 +1373,19 @@ export default function InspectionCameraScreen() {
 
                 // On-device coverage credit: when embedding similarity is high enough,
                 // grant coverage immediately without waiting for server round-trip.
-                // Do not require full detector lock during walkthrough motion.
-                if (!onDeviceCreditedRef.current.has(locked.baseline.id)) {
+                // Anti-stacking: require cooldown between credits for different baselines
+                // to prevent one held position from farming multiple angles.
+                const alreadyCredited = onDeviceCreditedRef.current.has(locked.baseline.id);
+                const lastCredit = lastOnDeviceCreditRef.current;
+                const isDifferentBaseline = !lastCredit || lastCredit.baselineId !== locked.baseline.id;
+                const cooldownActive = isDifferentBaseline && lastCredit &&
+                  (Date.now() - lastCredit.timestamp) < ON_DEVICE_CREDIT_COOLDOWN_MS;
+
+                if (!alreadyCredited && !cooldownActive) {
                   const baselineId = locked.baseline.id;
                   const bRoomId = locked.baseline.roomId;
                   onDeviceCreditedRef.current.add(baselineId);
+                  lastOnDeviceCreditRef.current = { baselineId, timestamp: Date.now() };
                   hasFirstMatchRef.current = true;
 
                   // Completion credit: matched baseline + cluster peers only
@@ -1410,8 +1423,24 @@ export default function InspectionCameraScreen() {
                     roomName: locked.baseline.roomName,
                     metadata: locked.baseline.metadata,
                   });
-                  showCaptureHint(`${displayLabel} captured (${scannedCount}/${totalAngles})`);
-                  void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+                  // Milestone-aware feedback
+                  const isRoomComplete = scannedCount >= totalAngles;
+                  const isHalfway = scannedCount === Math.ceil(totalAngles / 2) && totalAngles > 2;
+                  const isLastAngle = (totalAngles - scannedCount) === 1;
+
+                  if (isRoomComplete) {
+                    showCaptureHint("Room coverage complete ✓");
+                    void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
+                  } else if (isLastAngle) {
+                    showCaptureHint(`${displayLabel} captured — 1 view left`);
+                    void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+                  } else if (isHalfway) {
+                    showCaptureHint(`${displayLabel} captured — halfway there (${scannedCount}/${totalAngles})`);
+                    void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+                  } else {
+                    showCaptureHint(`${displayLabel} captured (${scannedCount}/${totalAngles})`);
+                    void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                  }
                   autoAdvanceIfRoomComplete(session, bRoomId);
                 }
               } else if (!locked.isLocked) {
