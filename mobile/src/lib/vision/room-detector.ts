@@ -109,6 +109,12 @@ const CLUSTER_SIMILARITY_THRESHOLD = 0.85;
 /** Max baselines per cluster. Prevents any cluster from reducing angle count too much. */
 const MAX_CLUSTER_SIZE = 2;
 
+function getMinimumEffectiveAngleCount(rawBaselineCount: number): number {
+  if (rawBaselineCount >= 6) return 3;
+  if (rawBaselineCount >= 3) return 2;
+  return rawBaselineCount;
+}
+
 function canClusterBaselines(a: BaselineAngle, b: BaselineAngle): boolean {
   const aType = a.metadata?.imageType;
   const bType = b.metadata?.imageType;
@@ -427,7 +433,13 @@ export class RoomDetector {
       }
     }
 
-    const total = totalRoots.size;
+    // Safety floor for walkthrough mode: a room with several training photos
+    // should never collapse to a single required angle, even if embeddings are
+    // very similar. This preserves a few distinct coverage anchors per room.
+    const total = Math.max(
+      totalRoots.size,
+      getMinimumEffectiveAngleCount(roomBaselines.length),
+    );
     const scanned = Math.min(scannedRoots.size, total);
     return {
       scanned,

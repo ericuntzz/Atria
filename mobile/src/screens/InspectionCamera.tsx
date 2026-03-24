@@ -2533,6 +2533,8 @@ export default function InspectionCameraScreen() {
               coverage={coverage}
               currentRoomName={currentRoom || undefined}
               roomWaypoints={roomWaypoints}
+              roomScannedCount={roomAngles.scanned}
+              roomTotalCount={roomAngles.total}
             />
           </View>
         </SafeAreaView>

@@ -11,12 +11,16 @@ interface Props {
   coverage: number; // 0-100 overall
   currentRoomName?: string;
   roomWaypoints?: RoomWaypoint[];
+  roomScannedCount?: number;
+  roomTotalCount?: number;
 }
 
 export default function CoverageTracker({
   coverage,
   currentRoomName,
   roomWaypoints,
+  roomScannedCount,
+  roomTotalCount,
 }: Props) {
   const clampedCoverage = Math.min(100, Math.max(0, coverage));
   const barColor =
@@ -26,8 +30,14 @@ export default function CoverageTracker({
         ? "#4DA6FF"
         : "#94a3b8";
 
-  const scannedCount = roomWaypoints?.filter((w) => w.scanned).length ?? 0;
-  const totalCount = roomWaypoints?.length ?? 0;
+  const scannedCount =
+    typeof roomScannedCount === "number"
+      ? roomScannedCount
+      : roomWaypoints?.filter((w) => w.scanned).length ?? 0;
+  const totalCount =
+    typeof roomTotalCount === "number"
+      ? roomTotalCount
+      : roomWaypoints?.length ?? 0;
   const roomCoverage =
     totalCount > 0 ? Math.round((scannedCount / totalCount) * 100) : null;
 
