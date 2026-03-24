@@ -185,6 +185,7 @@ export default function PropertyTrainingScreen() {
   const uploadedIdsRef = useRef<Map<string, string[]>>(new Map());
   const cancelRequestedRef = useRef(false);
   const runIdRef = useRef(0);
+  const trainingAbortRef = useRef<AbortController | null>(null);
   const videoKeyframesAvailable = videoThumbnailsRef.current !== null;
 
   // ── Processing Screen Animations ──
@@ -719,6 +720,9 @@ export default function PropertyTrainingScreen() {
     if (phase !== "uploading" && phase !== "training") return;
     cancelRequestedRef.current = true;
     runIdRef.current++;
+    // Abort the in-flight training HTTP request so the server stops processing
+    trainingAbortRef.current?.abort();
+    trainingAbortRef.current = null;
     setError("Upload/training canceled.");
     setPhase("capturing");
   }, [phase]);
@@ -839,7 +843,11 @@ export default function PropertyTrainingScreen() {
       // Trigger training
       stage = "train";
       setPhase("training");
-      const result = await trainProperty(propertyId, mediaUploadIds);
+      const abortController = new AbortController();
+      trainingAbortRef.current = abortController;
+      const result = await trainProperty(propertyId, mediaUploadIds, {
+        signal: abortController.signal,
+      });
       if (!isRunActive(currentRunId)) {
         return;
       }

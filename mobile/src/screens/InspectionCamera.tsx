@@ -191,7 +191,7 @@ export default function InspectionCameraScreen() {
         ? "Frame"
         : "OpenGlass";
 
-  const [permission, requestPermission] = useCameraPermissions();
+  const [permission, requestPermission, getPermission] = useCameraPermissions();
   const [paused, setPaused] = useState(false);
   const [currentRoom, setCurrentRoom] = useState<string | null>(null);
   const [findings, setFindings] = useState<Finding[]>([]);
@@ -306,6 +306,9 @@ export default function InspectionCameraScreen() {
   const hasFirstMatchRef = useRef(false);
   /** Last room-confidence signal from the detector loop. */
   const roomConfidenceRef = useRef(0);
+  const isAutoDetectReloadingRef = useRef(false);
+  const needsAutoDetectReloadRef = useRef(false);
+  const autoDetectReloadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     autoCaptureEnabledRef.current = autoCaptureEnabled;
@@ -386,6 +389,7 @@ export default function InspectionCameraScreen() {
   const captureHighResFrame = useCallback(async (): Promise<CapturedFrameData | null> => {
     if (!cameraRef.current || isCapturingRef.current) return null;
     isCapturingRef.current = true;
+    let photoUri: string | undefined;
     try {
       const photo = await cameraRef.current.takePictureAsync({
         quality: 0.7,
@@ -394,11 +398,18 @@ export default function InspectionCameraScreen() {
       if (!photo?.base64 || !photo.uri) {
         return null;
       }
-      return {
+      photoUri = photo.uri;
+      const result = {
         dataUri: `data:image/jpeg;base64,${photo.base64}`,
         uri: photo.uri,
       };
+      // Clean up temp file immediately — we have the base64 data in memory.
+      // This prevents file leaks if callers don't clean up.
+      FileSystem.deleteAsync(photo.uri, { idempotent: true }).catch(() => {});
+      return result;
     } catch {
+      // Clean up on error too
+      if (photoUri) FileSystem.deleteAsync(photoUri, { idempotent: true }).catch(() => {});
       return null;
     } finally {
       isCapturingRef.current = false;
@@ -836,28 +847,11 @@ export default function InspectionCameraScreen() {
       });
 
     // Attempt to load ONNX model for auto room detection
-    loadOnnxModel()
-      .then((loader) => {
-        modelLoaderRef.current = loader;
-        if (loader.isLoaded) {
-          setAutoDetectUnavailableReason(null);
-          roomDetector.setModelLoader(loader);
-          setIsAutoDetect(true);
-          startRoomDetectionLoop(roomDetector, session);
-        } else if (loader.unavailableReason) {
-          setAutoDetectUnavailableReason(loader.unavailableReason);
-          setCaptureHint(loader.unavailableReason);
-          Alert.alert("Use The Atria Dev Build", loader.unavailableReason);
-        }
-      })
-      .catch((err) => {
-        console.warn("ONNX model load failed, room auto-detect disabled:", err);
-        const fallbackMessage =
-          "AI inspection requires the Atria dev build. Open the latest dev build instead of Expo Go.";
-        setAutoDetectUnavailableReason(fallbackMessage);
-        setCaptureHint(fallbackMessage);
-        Alert.alert("Use The Atria Dev Build", fallbackMessage);
-      });
+    void ensureAutoDetectModel({
+      alertOnFailure: true,
+      unavailableReason:
+        "AI inspection requires the Atria dev build. Open the latest dev build instead of Expo Go.",
+    });
 
     // Start auto-capture loop (every 3s, checks if conditions are met)
     autoCaptureTimerRef.current = setInterval(() => {
@@ -887,6 +881,9 @@ export default function InspectionCameraScreen() {
       if (targetAssistTimerRef.current) {
         clearTimeout(targetAssistTimerRef.current);
       }
+      if (autoDetectReloadTimerRef.current) {
+        clearTimeout(autoDetectReloadTimerRef.current);
+      }
       if (processingTimeoutId) {
         clearTimeout(processingTimeoutId);
       }
@@ -913,35 +910,54 @@ export default function InspectionCameraScreen() {
         }
       } else if (nextAppState === "active" && appStateRef.wasBackground) {
         appStateRef.wasBackground = false;
-
-        // Re-check camera permission — user may have revoked in Settings
-        if (permission && !permission.granted) {
-          console.warn("[InspectionCamera] Camera permission revoked while backgrounded");
-          // Don't restart loops — the permission-denied UI will render
-          return;
-        }
-
-        if (!pausedRef.current) {
-          motionFilterRef.current?.start();
-
-          // Restart auto-capture interval if it was running before backgrounding
-          if (autoCaptureEnabledRef.current && !autoCaptureTimerRef.current) {
-            const s = sessionRef.current;
-            const c = comparisonRef.current;
-            if (s && c) {
-              autoCaptureTimerRef.current = setInterval(() => {
-                void autoCapturTickRef.current?.(s, c);
-              }, AUTO_CAPTURE_INTERVAL_MS);
+        void (async () => {
+          try {
+            // Re-check camera permission against the real system state — the
+            // cached hook value may be stale after the user returns from Settings.
+            const latestPermission = await getPermission();
+            if (!latestPermission.granted) {
+              console.warn("[InspectionCamera] Camera permission revoked while backgrounded");
+              return;
             }
-          }
 
-          // Restart room detection loop if detector exists and loop is dead
-          const detector = roomDetectorRef.current;
-          const session = sessionRef.current;
-          if (detector && session && !roomDetectionTimerRef.current) {
-            startRoomDetectionLoop(detector, session);
+            if (!pausedRef.current) {
+              motionFilterRef.current?.start();
+
+              // Restart auto-capture interval if it was running before backgrounding
+              if (autoCaptureEnabledRef.current && !autoCaptureTimerRef.current) {
+                const s = sessionRef.current;
+                const c = comparisonRef.current;
+                if (s && c) {
+                  autoCaptureTimerRef.current = setInterval(() => {
+                    void autoCapturTickRef.current?.(s, c);
+                  }, AUTO_CAPTURE_INTERVAL_MS);
+                }
+              }
+
+              if (needsAutoDetectReloadRef.current) {
+                await ensureAutoDetectModel({
+                  unavailableReason:
+                    "AI room detection paused after low memory. Reopen the inspection if it does not recover.",
+                  successHint: "AI room detection restored",
+                });
+              }
+
+              // Restart room detection loop if detector exists and loop is dead
+              const detector = roomDetectorRef.current;
+              const session = sessionRef.current;
+              if (
+                detector &&
+                session &&
+                modelLoaderRef.current?.isLoaded &&
+                !roomDetectionTimerRef.current
+              ) {
+                startRoomDetectionLoop(detector, session);
+              }
+            }
+          } catch (err) {
+            console.warn("[InspectionCamera] Failed to refresh camera permission on foreground:", err);
           }
-        }
+        })();
       }
     };
 
@@ -955,8 +971,34 @@ export default function InspectionCameraScreen() {
         clearTimeout(roomDetectionTimerRef.current);
         roomDetectionTimerRef.current = null;
       }
-      // Dispose ONNX model to free memory
-      modelLoaderRef.current?.dispose();
+      if (autoDetectReloadTimerRef.current) {
+        clearTimeout(autoDetectReloadTimerRef.current);
+        autoDetectReloadTimerRef.current = null;
+      }
+      // Dispose ONNX model to free memory, then reload it once the app has a
+      // chance to breathe so auto-detect is not silently lost for the session.
+      if (modelLoaderRef.current?.isLoaded) {
+        needsAutoDetectReloadRef.current = true;
+        setIsAutoDetect(false);
+        setAutoDetectUnavailableReason("Low memory - reloading AI room detection...");
+        modelLoaderRef.current.dispose();
+        modelLoaderRef.current = null;
+        showCaptureHint("Low memory - reloading AI room detection...");
+        autoDetectReloadTimerRef.current = setTimeout(() => {
+          autoDetectReloadTimerRef.current = null;
+          if (
+            needsAutoDetectReloadRef.current &&
+            AppState.currentState === "active" &&
+            !pausedRef.current
+          ) {
+            void ensureAutoDetectModel({
+              unavailableReason:
+                "AI room detection paused after low memory. Reopen the inspection if it does not recover.",
+              successHint: "AI room detection restored",
+            });
+          }
+        }, 1500);
+      }
       // Force-reset any stuck comparisons to free buffered images
       comparisonRef.current?.forceResetStuckComparison();
     });
@@ -965,6 +1007,7 @@ export default function InspectionCameraScreen() {
       subscription.remove();
       memorySubscription.remove();
     };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const updateCoverageUI = useCallback(
@@ -1305,7 +1348,10 @@ export default function InspectionCameraScreen() {
               const roomIsConfident =
                 detector.getCurrentRoom() === locked.baseline.roomId &&
                 roomConfidenceRef.current >= LOCALIZATION_ROOM_SYNC_THRESHOLD;
-              const onDeviceThreshold = !hasFirstMatchRef.current
+              // First-match boost guard: for multi-room, require room detection agreement
+              const firstMatchAllowed = isSingleRoom ||
+                detector.getCurrentRoom() === locked.baseline.roomId;
+              const onDeviceThreshold = !hasFirstMatchRef.current && firstMatchAllowed
                 ? ON_DEVICE_COVERAGE_THRESHOLD_FIRST_MATCH
                 : roomIsConfident
                   ? ON_DEVICE_COVERAGE_THRESHOLD_ROOM_CONFIRMED
@@ -1412,6 +1458,74 @@ export default function InspectionCameraScreen() {
       roomDetectionTimerRef.current = setTimeout(tick, 1000); // Initial 1s delay
     },
     [activateRoom, syncRoomFromLockedBaseline, updateCoverageUI, showCaptureHint, autoAdvanceIfRoomComplete],
+  );
+
+  const ensureAutoDetectModel = useCallback(
+    async (options?: {
+      alertOnFailure?: boolean;
+      unavailableReason?: string;
+      successHint?: string;
+    }) => {
+      if (!isMountedRef.current || isAutoDetectReloadingRef.current) return;
+
+      isAutoDetectReloadingRef.current = true;
+      needsAutoDetectReloadRef.current = false;
+
+      try {
+        const loader = await loadOnnxModel();
+        if (!isMountedRef.current) {
+          loader.dispose();
+          return;
+        }
+
+        modelLoaderRef.current = loader;
+        roomDetectorRef.current?.setModelLoader(loader);
+
+        if (loader.isLoaded) {
+          setAutoDetectUnavailableReason(null);
+          setIsAutoDetect(true);
+          if (options?.successHint) {
+            showCaptureHint(options.successHint);
+          }
+
+          const detector = roomDetectorRef.current;
+          const session = sessionRef.current;
+          if (
+            detector &&
+            session &&
+            !pausedRef.current &&
+            !roomDetectionTimerRef.current
+          ) {
+            startRoomDetectionLoop(detector, session);
+          }
+          return;
+        }
+
+        const reason =
+          loader.unavailableReason ||
+          options?.unavailableReason ||
+          "AI inspection is unavailable in this app runtime.";
+        setIsAutoDetect(false);
+        setAutoDetectUnavailableReason(reason);
+        if (options?.alertOnFailure) {
+          Alert.alert("Use The Atria Dev Build", reason);
+        }
+      } catch (err) {
+        console.warn("ONNX model load failed, room auto-detect disabled:", err);
+        if (!isMountedRef.current) return;
+        const fallbackMessage =
+          options?.unavailableReason ||
+          "AI inspection requires the Atria dev build. Open the latest dev build instead of Expo Go.";
+        setIsAutoDetect(false);
+        setAutoDetectUnavailableReason(fallbackMessage);
+        if (options?.alertOnFailure) {
+          Alert.alert("Use The Atria Dev Build", fallbackMessage);
+        }
+      } finally {
+        isAutoDetectReloadingRef.current = false;
+      }
+    },
+    [showCaptureHint, startRoomDetectionLoop],
   );
 
   const captureChangeFrame = useCallback(async (): Promise<Uint8Array | null> => {

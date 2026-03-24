@@ -440,12 +440,17 @@ export async function deleteInspectionFinding(
 // Training
 // ============================================================================
 
-export async function trainProperty(propertyId: string, mediaUploadIds: string[]) {
+export async function trainProperty(
+  propertyId: string,
+  mediaUploadIds: string[],
+  options?: { signal?: AbortSignal },
+) {
   const res = await authFetch(`/api/properties/${propertyId}/train`, {
     method: "POST",
     json: { mediaUploadIds },
     timeoutMs: 180_000, // 3 min — training calls Claude Vision + creates rooms/items/baselines
     noRetry: true, // Don't retry training — server may already be processing
+    signal: options?.signal,
   });
   return res.json();
 }

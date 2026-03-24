@@ -87,6 +87,20 @@ export function enqueueBulkSubmission(params: {
   });
 }
 
+/**
+ * Remove all queued submissions for a specific inspection.
+ * Call after property delete to prevent orphaned submissions from retrying.
+ */
+export function purgeQueueByInspectionId(inspectionId: string): Promise<void> {
+  return withQueueLock(async () => {
+    const queue = await readQueue();
+    const filtered = queue.filter((entry) => entry.inspectionId !== inspectionId);
+    if (filtered.length < queue.length) {
+      await writeQueue(filtered);
+    }
+  });
+}
+
 // Entries older than 7 days are purged — they will never succeed
 const MAX_QUEUE_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 
