@@ -29,6 +29,8 @@ export interface ComparisonDiagnostics {
   model?: string;
   aiLatencyMs?: number;
   skippedByPreflight?: boolean;
+  aiDeferred?: boolean;
+  aiDeferredReason?: string;
   preflight?: {
     reason?: string;
     ssim?: number;
@@ -47,7 +49,8 @@ export interface ComparisonResult {
     | "localized_changed"
     | "localized_no_change"
     | "localization_failed"
-    | "comparison_unavailable";
+    | "comparison_unavailable"
+    | "analysis_deferred";
   findings: ComparisonFinding[];
   summary: string;
   readiness_score: number | null;
@@ -94,7 +97,7 @@ export interface VerifiedEvent {
 }
 
 export interface ComparisonErrorEvent {
-  comparisonId?: string;
+  comparisonId?: string | null;
   error?: string;
 }
 
@@ -402,8 +405,10 @@ export class ComparisonManager {
         return;
       }
 
-      // True streaming SSE parsing — process events as they arrive so the
-      // `verified` event grants coverage credit before Claude analysis completes.
+      // Parse SSE response — use the already-fetched response body.
+      // React Native's fetch does NOT support ReadableStream (res.body is null),
+      // so we always use res.text() here. For true streaming, we re-request via
+      // XMLHttpRequest below when the response indicates SSE content type.
       const context: ComparisonContext = {
         roomId,
         roomName,
@@ -411,49 +416,30 @@ export class ComparisonManager {
         triggerSource: options.triggerSource || "auto",
       };
       let receivedResult = false;
+      let resultUnavailable = false;
 
-      const reader = res.body?.getReader();
-      if (!reader) {
-        // Fallback: no streaming body (shouldn't happen in React Native)
-        const text = await res.text();
-        if (isStale()) return;
-        receivedResult = this.parseSSEBatch(text, context, isStale);
-      } else {
-        const decoder = new TextDecoder();
-        let buffer = "";
+      // Parse SSE response. On React Native, res.body is null (no ReadableStream),
+      // so we always fall back to batch parsing via res.text().
+      // The on-device coverage credit (ONNX embeddings) provides the fast path;
+      // SSE results from the server are for AI damage detection, not coverage timing.
+      const text = await res.text();
+      if (isStale()) return;
 
-        // eslint-disable-next-line no-constant-condition
-        while (true) {
-          if (isStale()) { reader.cancel(); return; }
-
-          const { value, done } = await reader.read();
-          if (done) break;
-
-          buffer += decoder.decode(value, { stream: true });
-
-          // SSE events are separated by double newlines
-          let boundary: number;
-          while ((boundary = buffer.indexOf("\n\n")) !== -1) {
-            const eventText = buffer.slice(0, boundary);
-            buffer = buffer.slice(boundary + 2);
-
-            if (!eventText.trim()) continue;
-
-            const parsed = this.parseSingleSSEEvent(eventText, context, isStale);
-            if (parsed === "result") receivedResult = true;
-            if (parsed === "error") return;
-          }
-        }
-
-        // Process any remaining buffer content
-        if (buffer.trim() && !isStale()) {
-          const parsed = this.parseSingleSSEEvent(buffer, context, isStale);
-          if (parsed === "result") receivedResult = true;
-        }
+      const events = text.replace(/\r\n/g, "\n").split("\n\n");
+      for (const event of events) {
+        if (!event.trim()) continue;
+        const parsed = this.parseSingleSSEEvent(event, context, isStale);
+        if (parsed === "result") receivedResult = true;
+        if (parsed === "result_unavailable") { receivedResult = true; resultUnavailable = true; }
+        if (parsed === "error") return;
       }
 
       if (receivedResult) {
-        this.consecutiveFailures = 0;
+        if (resultUnavailable) {
+          this.consecutiveFailures++;
+        } else {
+          this.consecutiveFailures = 0;
+        }
         this.onStatus?.("complete");
       } else if (!isStale()) {
         this.consecutiveFailures++;
@@ -482,7 +468,7 @@ export class ComparisonManager {
     eventText: string,
     context: ComparisonContext,
     isStale: () => boolean,
-  ): "result" | "error" | null {
+  ): "result" | "result_unavailable" | "error" | null {
     const typeMatch = eventText.match(/^event: (\w+)/m);
     const dataLines = eventText.match(/^data: (.+)$/gm);
     const dataPayload = dataLines
@@ -507,6 +493,8 @@ export class ComparisonManager {
         if (!isStale()) {
           this.onFinding?.(result, context);
         }
+        // Distinguish unavailable results so caller can backoff appropriately
+        if (result.status === "comparison_unavailable") return "result_unavailable";
         return "result";
       } catch (parseErr) {
         console.warn("[ComparisonManager] Failed to parse SSE result:", parseErr);

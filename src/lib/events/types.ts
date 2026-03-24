@@ -153,7 +153,8 @@ export interface ComparisonReceivedPayload {
     | "localized_changed"
     | "localized_no_change"
     | "localization_failed"
-    | "comparison_unavailable";
+    | "comparison_unavailable"
+    | "analysis_deferred";
   serverEmbeddingSimilarity?: number;
   candidatesAttempted?: number;
   geometricVerified?: boolean;
@@ -163,6 +164,8 @@ export interface ComparisonReceivedPayload {
   geometricOverlapArea?: number;
   rejectionReasons?: string[];
   skippedByPreflight?: boolean;
+  aiDeferred?: boolean;
+  aiDeferredReason?: string;
   preflightReason?: string;
   preflightSsim?: number;
   preflightDiffPercent?: number;

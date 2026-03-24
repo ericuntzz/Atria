@@ -1,11 +1,40 @@
 import { NextRequest } from "next/server";
 import { getDbUser, isValidUUID, isSafeUrl } from "@/lib/auth";
-import { verifyGeometry, analyzeWithAI, type InspectionMode, type GeometryOutcome } from "@/lib/vision/compare";
+import {
+  verifyGeometry,
+  analyzeWithAI,
+  type ComparisonResult,
+  type InspectionMode,
+  type GeometryOutcome,
+} from "@/lib/vision/compare";
 import { rerankCandidateBaselinesByServerEmbedding } from "@/lib/vision/candidate-rerank";
 import { db } from "@/server/db";
 import { baselineImages, baselineVersions, inspections, rooms } from "@/server/schema";
 import { eq, and, inArray } from "drizzle-orm";
 import { emitEventSafe } from "@/lib/events/emit";
+
+const MAX_PENDING_AI_ANALYSES_PER_INSPECTION = 5;
+const activeAiAnalysesByInspection = new Map<string, number>();
+
+function getActiveAiAnalyses(inspectionId: string): number {
+  return activeAiAnalysesByInspection.get(inspectionId) ?? 0;
+}
+
+function incrementActiveAiAnalyses(inspectionId: string) {
+  activeAiAnalysesByInspection.set(
+    inspectionId,
+    getActiveAiAnalyses(inspectionId) + 1,
+  );
+}
+
+function decrementActiveAiAnalyses(inspectionId: string) {
+  const next = getActiveAiAnalyses(inspectionId) - 1;
+  if (next <= 0) {
+    activeAiAnalysesByInspection.delete(inspectionId);
+  } else {
+    activeAiAnalysesByInspection.set(inspectionId, next);
+  }
+}
 
 /**
  * POST /api/vision/compare-stream
@@ -271,6 +300,8 @@ export async function POST(request: NextRequest) {
       try {
         const compareStartedAt = Date.now();
         comparisonId = crypto.randomUUID();
+        let geometry: GeometryOutcome | null = null;
+        let finalResult: (ComparisonResult & { comparisonId: string }) | null = null;
 
         if (inspectionId && roomId && baselineImageId) {
           await emitEventSafe({
@@ -308,11 +339,11 @@ export async function POST(request: NextRequest) {
         };
 
         // Phase 1: Geometric verification (~500ms-2s)
-        const geometry = await verifyGeometry(compareOptions);
+        geometry = await verifyGeometry(compareOptions);
 
         if (!geometry.verified) {
           // Localization failed — emit result directly (no verified event)
-          const failedResult = {
+          finalResult = {
             status: "localization_failed" as const,
             findings: [],
             summary: "Could not verify this view.",
@@ -327,11 +358,6 @@ export async function POST(request: NextRequest) {
             },
           };
 
-          controller.enqueue(
-            encoder.encode(
-              `event: result\ndata: ${JSON.stringify(failedResult)}\n\n`,
-            ),
-          );
         } else {
           // Emit fast "verified" event — client can grant coverage credit NOW
           controller.enqueue(
@@ -346,20 +372,47 @@ export async function POST(request: NextRequest) {
           );
 
           // Phase 2: Preflight + Claude Vision (~100ms-30s)
-          const result = await analyzeWithAI(geometry, compareOptions);
-
-          // Attach comparisonId for client-side correlation
-          const resultWithId = { ...result, comparisonId };
-
-          controller.enqueue(
-            encoder.encode(
-              `event: result\ndata: ${JSON.stringify(resultWithId)}\n\n`,
-            ),
-          );
+          const queueInspectionId =
+            typeof inspectionId === "string" ? inspectionId : null;
+          if (
+            queueInspectionId &&
+            getActiveAiAnalyses(queueInspectionId) >=
+              MAX_PENDING_AI_ANALYSES_PER_INSPECTION
+          ) {
+            finalResult = {
+              status: "analysis_deferred" as const,
+              findings: [],
+              summary: "View captured. AI analysis deferred due to inspection load.",
+              readiness_score: null,
+              verifiedBaselineId: geometry.verifiedCandidateId,
+              userGuidance: "Continue walking. This view was captured.",
+              comparisonId,
+              diagnostics: {
+                aiDeferred: true,
+                aiDeferredReason: "ai_queue_full",
+                model: "queue-guard",
+                geometricVerification: geometry.diagnostics,
+              },
+            };
+          } else {
+            if (queueInspectionId) incrementActiveAiAnalyses(queueInspectionId);
+            try {
+              const result = await analyzeWithAI(geometry, compareOptions);
+              finalResult = { ...result, comparisonId };
+            } finally {
+              if (queueInspectionId) decrementActiveAiAnalyses(queueInspectionId);
+            }
+          }
         }
 
+        controller.enqueue(
+          encoder.encode(
+            `event: result\ndata: ${JSON.stringify(finalResult)}\n\n`,
+          ),
+        );
+
         // Emit telemetry event
-        if (inspectionId && roomId && baselineImageId) {
+        if (inspectionId && roomId && baselineImageId && geometry && finalResult) {
           const geometricDiagnostics = geometry.diagnostics;
           await emitEventSafe({
             eventType: "ComparisonReceived",
@@ -369,12 +422,13 @@ export async function POST(request: NextRequest) {
             payload: {
               roomId: roomId as string,
               baselineImageId: baselineImageId as string,
-              findingsCount: 0,
+              findingsCount: finalResult.findings.length,
+              score: finalResult.readiness_score ?? undefined,
               latencyMs: Date.now() - compareStartedAt,
               clientSimilarity: validatedClientSimilarity,
               topCandidateIds: validatedTopCandidateIds,
               verifiedCandidateId: geometry.verifiedCandidateId ?? undefined,
-              gateDecision: geometry.verified ? "localized_changed" : "localization_failed",
+              gateDecision: finalResult.status,
               serverEmbeddingSimilarity:
                 geometricDiagnostics?.serverEmbeddingSimilarity,
               candidatesAttempted: geometricDiagnostics?.candidatesAttempted,
@@ -384,6 +438,22 @@ export async function POST(request: NextRequest) {
               geometricInlierSpread: geometricDiagnostics?.inlierSpread,
               geometricOverlapArea: geometricDiagnostics?.overlapArea,
               rejectionReasons: geometricDiagnostics?.rejectionReasons,
+              skippedByPreflight:
+                Boolean(finalResult.diagnostics?.skippedByPreflight),
+              aiDeferred: Boolean(finalResult.diagnostics?.aiDeferred),
+              aiDeferredReason:
+                typeof finalResult.diagnostics?.aiDeferredReason === "string"
+                  ? finalResult.diagnostics.aiDeferredReason
+                  : undefined,
+              preflightReason:
+                finalResult.diagnostics?.preflight?.reason ?? undefined,
+              preflightSsim:
+                finalResult.diagnostics?.preflight?.ssim ?? undefined,
+              preflightDiffPercent:
+                finalResult.diagnostics?.preflight?.diffPercent ?? undefined,
+              preflightAlignmentScore:
+                finalResult.diagnostics?.preflight?.alignment?.score ??
+                undefined,
             },
             metadata: {
               source: "mobile",

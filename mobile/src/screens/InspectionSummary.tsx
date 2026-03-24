@@ -462,7 +462,9 @@ export default function InspectionSummaryScreen() {
                     ? "Needs attention"
                     : "Significant issues found"
               : data.rooms.length > 0
-                ? "No verified views captured"
+                ? data.overallCoverage > 0
+                  ? "Coverage captured; AI scoring unavailable"
+                  : "No captured views yet"
                 : "No comparisons run"}
           </Text>
           {/* Score bar */}

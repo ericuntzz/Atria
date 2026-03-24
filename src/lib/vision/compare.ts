@@ -30,7 +30,8 @@ export type ComparisonStatus =
   | "localized_changed"
   | "localized_no_change"
   | "localization_failed"
-  | "comparison_unavailable";
+  | "comparison_unavailable"
+  | "analysis_deferred";
 
 export interface ComparisonResult {
   status: ComparisonStatus;
@@ -43,6 +44,8 @@ export interface ComparisonResult {
     model?: string;
     aiLatencyMs?: number;
     skippedByPreflight?: boolean;
+    aiDeferred?: boolean;
+    aiDeferredReason?: string;
     preflight?: PreflightGateResult;
     geometricVerification?: {
       verified: boolean;

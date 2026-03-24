@@ -613,6 +613,14 @@ export default function InspectionCameraScreen() {
         return;
       }
 
+      if (result.status === "analysis_deferred") {
+        setLocalizationState("localized");
+        setShowTargetAssist(false);
+        setUserSelectedBaselineId(null);
+        showCaptureHint("Saved view captured; AI analysis deferred");
+        return;
+      }
+
       setLocalizationState("localized");
       setShowTargetAssist(false);
       setUserSelectedBaselineId(null);
@@ -1160,6 +1168,10 @@ export default function InspectionCameraScreen() {
               const gap = topK.length >= 2
                 ? topK[0].similarity - topK[1].similarity
                 : 1;
+              const isSingleRoom = baselinesRef.current.length <= 1;
+              const highConfidenceWalkingMatch =
+                locked.similarity >= ON_DEVICE_COVERAGE_THRESHOLD &&
+                (isSingleRoom || gap >= LOCALIZATION_AMBIGUITY_GAP);
 
               if (locked.similarity < LOCALIZATION_NOT_READY_THRESHOLD) {
                 setLocalizationState(
@@ -1168,26 +1180,14 @@ export default function InspectionCameraScreen() {
                     : "not_localized",
                 );
                 setLocalizationStuckSince((prev) => prev ?? Date.now());
-              } else if (!locked.isLocked) {
-                setLocalizationState("localizing");
-                setLocalizationStuckSince((prev) => prev ?? Date.now());
-              } else if (gap < LOCALIZATION_AMBIGUITY_GAP && baselinesRef.current.length > 1) {
-                // Only show ambiguous state for multi-room properties;
-                // single-room properties should just use the best candidate
-                setLocalizationState("ambiguous");
-                setLocalizationStuckSince((prev) => prev ?? Date.now());
-              } else if (locked.similarity >= LOCALIZATION_LOCKED_THRESHOLD) {
+              } else if (highConfidenceWalkingMatch) {
                 setLocalizationState("localized");
                 setLocalizationStuckSince(null);
 
                 // On-device coverage credit: when embedding similarity is high enough,
                 // grant coverage immediately without waiting for server round-trip.
-                // Don't require full lock (3 frames / ~1s) — a single high-similarity
-                // frame is enough during walking. The threshold already prevents false matches.
-                if (
-                  locked.similarity >= ON_DEVICE_COVERAGE_THRESHOLD &&
-                  !onDeviceCreditedRef.current.has(locked.baseline.id)
-                ) {
+                // Do not require full detector lock during walkthrough motion.
+                if (!onDeviceCreditedRef.current.has(locked.baseline.id)) {
                   const baselineId = locked.baseline.id;
                   const bRoomId = locked.baseline.roomId;
                   onDeviceCreditedRef.current.add(baselineId);
@@ -1212,6 +1212,17 @@ export default function InspectionCameraScreen() {
                   void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
                   autoAdvanceIfRoomComplete(session, bRoomId);
                 }
+              } else if (!locked.isLocked) {
+                setLocalizationState("localizing");
+                setLocalizationStuckSince((prev) => prev ?? Date.now());
+              } else if (gap < LOCALIZATION_AMBIGUITY_GAP && baselinesRef.current.length > 1) {
+                // Only show ambiguous state for multi-room properties;
+                // single-room properties should just use the best candidate
+                setLocalizationState("ambiguous");
+                setLocalizationStuckSince((prev) => prev ?? Date.now());
+              } else if (locked.similarity >= LOCALIZATION_LOCKED_THRESHOLD) {
+                setLocalizationState("localized");
+                setLocalizationStuckSince(null);
               } else {
                 setLocalizationState("localizing");
                 setLocalizationStuckSince((prev) => prev ?? Date.now());
@@ -1593,6 +1604,28 @@ export default function InspectionCameraScreen() {
 
   const handleEndInspection = useCallback(async () => {
     if (isSubmittingRef.current) return;
+    isSubmittingRef.current = true;
+
+    const session = sessionRef.current;
+    const comparison = comparisonRef.current;
+    if (!session) {
+      isSubmittingRef.current = false;
+      navigation.replace("InspectionSummary", { inspectionId, propertyId });
+      return;
+    }
+
+    // Stop new detection/capture work, but allow in-flight comparisons to finish.
+    comparison?.pause();
+    session.pause();
+    motionFilterRef.current?.stop();
+    if (autoCaptureTimerRef.current) {
+      clearInterval(autoCaptureTimerRef.current);
+      autoCaptureTimerRef.current = null;
+    }
+    if (roomDetectionTimerRef.current) {
+      clearTimeout(roomDetectionTimerRef.current);
+      roomDetectionTimerRef.current = null;
+    }
 
     // Clean up stale pending analyses (>90s)
     const now = Date.now();
@@ -1604,28 +1637,27 @@ export default function InspectionCameraScreen() {
       }
     }
 
-    // Log if AI analyses are still in-flight (coverage already recorded, findings may be missed)
-    const pendingCount = pendingAnalysesRef.current.size;
+    // Give in-flight AI analyses a short chance to land without asking the user to wait.
+    let pendingCount = pendingAnalysesRef.current.size;
     if (pendingCount > 0) {
-      console.warn(
-        `[InspectionCamera] Ending inspection with ${pendingCount} pending AI analysis(es). Coverage already recorded.`,
-      );
-      // Clear pending tracking — coverage was already granted by verified events
-      pendingAnalysesRef.current.clear();
-      verifiedComparisonIdsRef.current.clear();
-    }
-
-    isSubmittingRef.current = true;
-
-    // Pause capture loops to prevent late findings from being missed
-    comparisonRef.current?.pause();
-    sessionRef.current?.pause();
-
-    const session = sessionRef.current;
-    if (!session) {
-      isSubmittingRef.current = false;
-      navigation.replace("InspectionSummary", { inspectionId, propertyId });
-      return;
+      showCaptureHint(`Finishing inspection... waiting on ${pendingCount} analysis${pendingCount === 1 ? "" : "es"}`);
+      const waitDeadline = Date.now() + 8000;
+      while (pendingAnalysesRef.current.size > 0 && Date.now() < waitDeadline) {
+        // Let onResult/onStatus callbacks drain naturally.
+        // eslint-disable-next-line no-await-in-loop
+        await new Promise((resolve) => setTimeout(resolve, 250));
+      }
+      pendingCount = pendingAnalysesRef.current.size;
+      if (pendingCount > 0) {
+        console.warn(
+          `[InspectionCamera] Ending inspection with ${pendingCount} deferred AI analysis(es). Coverage already recorded.`,
+        );
+        session.recordEvent("inspection_analysis_deferred", undefined, {
+          pendingCount,
+        });
+        pendingAnalysesRef.current.clear();
+        verifiedComparisonIdsRef.current.clear();
+      }
     }
 
     try {
@@ -1670,20 +1702,34 @@ export default function InspectionCameraScreen() {
         continue;
       }
 
-      results.push({
-        roomId,
-        baselineImageId: firstBaseline.id,
-        score: visit.bestScore ?? null,
-        findings: confirmedFindings.map((f) => ({
+      const findingsPayload = confirmedFindings.map((f) => ({
             id: f.id,
             description: f.description,
             severity: f.severity,
             confidence: f.confidence,
             category: f.category,
             isClaimable: f.isClaimable || false,
-            source: f.category === "manual_note" ? "manual_note" : "ai",
-          })),
-      });
+            source: (f.category === "manual_note" ? "manual_note" : "ai") as "manual_note" | "ai",
+          }));
+
+      const scannedBaselineIds = Array.from(visit.anglesScanned);
+      if (scannedBaselineIds.length > 0) {
+        scannedBaselineIds.forEach((baselineId, index) => {
+          results.push({
+            roomId,
+            baselineImageId: baselineId,
+            score: index === 0 ? visit.bestScore ?? null : null,
+            findings: index === 0 ? findingsPayload : [],
+          });
+        });
+      } else {
+        results.push({
+          roomId,
+          baselineImageId: firstBaseline.id,
+          score: visit.bestScore ?? null,
+          findings: findingsPayload,
+        });
+      }
     }
 
     session.recordEvent("inspection_submit_requested", undefined, {
