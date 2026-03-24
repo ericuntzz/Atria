@@ -447,6 +447,16 @@ export default function InspectionCameraScreen() {
     // Register verified callback — grants coverage credit early (~1-2s)
     comparison.onVerified((event, context) => {
       if (!isMountedRef.current) return;
+
+      // Sweep stale pending entries (>90s) on every verified event
+      const now = Date.now();
+      for (const [id, entry] of pendingAnalysesRef.current) {
+        if (now - entry.startedAt > 90_000) {
+          pendingAnalysesRef.current.delete(id);
+          verifiedComparisonIdsRef.current.delete(id);
+        }
+      }
+
       const { roomId, roomName, baselineImageId } = context;
       const resolvedBaseline = event.verifiedBaselineId
         ? getBaselineById(event.verifiedBaselineId)
@@ -710,6 +720,14 @@ export default function InspectionCameraScreen() {
       }
       if (status === "error") {
         showCaptureHint("That angle could not be analyzed. Try again.");
+        // Clean up any stale pending entries since error events don't carry comparisonId
+        const now = Date.now();
+        for (const [id, entry] of pendingAnalysesRef.current) {
+          if (now - entry.startedAt > 10_000) {
+            pendingAnalysesRef.current.delete(id);
+            verifiedComparisonIdsRef.current.delete(id);
+          }
+        }
       }
     });
 
@@ -1542,21 +1560,15 @@ export default function InspectionCameraScreen() {
       }
     }
 
-    // Warn if AI analyses are still in-flight
+    // Log if AI analyses are still in-flight (coverage already recorded, findings may be missed)
     const pendingCount = pendingAnalysesRef.current.size;
     if (pendingCount > 0) {
-      const proceed = await new Promise<boolean>((resolve) => {
-        Alert.alert(
-          "Analyses in Progress",
-          `${pendingCount} angle${pendingCount > 1 ? "s are" : " is"} still being analyzed by AI. Coverage is already recorded — finishing now may miss some findings.`,
-          [
-            { text: "Wait", style: "cancel", onPress: () => resolve(false) },
-            { text: "Finish Now", style: "destructive", onPress: () => resolve(true) },
-          ],
-          { cancelable: true, onDismiss: () => resolve(false) },
-        );
-      });
-      if (!proceed) return;
+      console.warn(
+        `[InspectionCamera] Ending inspection with ${pendingCount} pending AI analysis(es). Coverage already recorded.`,
+      );
+      // Clear pending tracking — coverage was already granted by verified events
+      pendingAnalysesRef.current.clear();
+      verifiedComparisonIdsRef.current.clear();
     }
 
     isSubmittingRef.current = true;

@@ -320,7 +320,7 @@ export async function POST(request: NextRequest) {
             userGuidance: "Try a slightly different angle.",
             comparisonId,
             diagnostics: {
-              skippedByPreflight: true,
+              skippedByPreflight: false,
               model: "geometric-verify",
               geometricVerification: geometry.diagnostics,
             },
