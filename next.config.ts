@@ -147,6 +147,11 @@ function buildTraceRouteMap(routes: string[], patterns: string[]) {
 }
 
 const nextConfig: NextConfig = {
+  // Keep onnxruntime-node out of the serverless function bundle — the native
+  // binary alone is ~335 MB which exceeds Vercel's 250 MB unzipped limit on
+  // the Hobby plan.  Routes that need ONNX will dynamically import it and
+  // gracefully degrade when the binary is unavailable.
+  serverExternalPackages: ["onnxruntime-node"],
   distDir:
     process.env.NODE_ENV === "production" ? ".next" : `.next-dev-${devPort}`,
   experimental: {

@@ -278,7 +278,7 @@ export function PropertyDetail({
               <ChevronLeft className="h-4 w-4" /> Properties
             </button>
           </Link>
-          <h1 className="text-xl font-semibold text-foreground">{property.name}</h1>
+          <h1 className="text-xl font-semibold text-foreground truncate" title={property.name}>{property.name}</h1>
           {(property.address || property.city) && (
             <p className="text-xs text-muted-foreground flex items-center gap-1 mt-1 min-w-0">
               <MapPin className="h-3 w-3 shrink-0" />
@@ -588,7 +588,7 @@ export function PropertyDetail({
           <DialogHeader>
             <DialogTitle>Delete Property</DialogTitle>
             <DialogDescription>
-              This will permanently delete &quot;{property.name}&quot; and all associated data including rooms, baselines, and inspections. This action cannot be undone.
+              This will permanently delete &quot;{property.name.length > 40 ? property.name.slice(0, 40) + "…" : property.name}&quot; and all associated data including rooms, baselines, and inspections. This action cannot be undone.
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
