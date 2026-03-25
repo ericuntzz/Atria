@@ -268,6 +268,7 @@ export default function InspectionCameraScreen() {
   const modelLoaderRef = useRef<OnnxModelLoader | null>(null);
   const roomDetectionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const captureHintTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const detailHintTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const targetAssistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const autoCaptureEnabledRef = useRef(autoCaptureEnabled);
   const autoAllRoomsCompleteHintRef = useRef(false);
@@ -407,6 +408,11 @@ export default function InspectionCameraScreen() {
     }
 
     setCaptureHint(message);
+    // Cancel any pending delayed detail hint so fresh captures aren't overwritten
+    if (detailHintTimerRef.current) {
+      clearTimeout(detailHintTimerRef.current);
+      detailHintTimerRef.current = null;
+    }
     if (captureHintTimerRef.current) {
       clearTimeout(captureHintTimerRef.current);
     }
@@ -835,7 +841,7 @@ export default function InspectionCameraScreen() {
           showCaptureHint(
             count === 1
               ? `⚠️ Issue found: ${truncated}`
-              : `⚠️ ${count} issues found — swipe down to review`,
+              : `⚠️ ${count} issues found — tap to review`,
           );
           // Mark affected baselines as having issues (for tri-state dots)
           if (resolvedBaselineId) {
@@ -1614,12 +1620,14 @@ export default function InspectionCameraScreen() {
                       .filter(Boolean)
                       .slice(0, 2); // Show at most 2 items
                     if (detailLabels.length > 0) {
-                      // Queue a delayed hint after the main capture feedback
-                      setTimeout(() => {
+                      // Queue a delayed hint — cancel any previous one first
+                      if (detailHintTimerRef.current) clearTimeout(detailHintTimerRef.current);
+                      detailHintTimerRef.current = setTimeout(() => {
+                        detailHintTimerRef.current = null;
                         if (isMountedRef.current && !pausedRef.current) {
                           showCaptureHint(`Tip: Get closer to check ${detailLabels.join(", ")}`);
                         }
-                      }, 5000); // Show 5s after capture to not overlap
+                      }, 5000);
                     }
                   }
 
@@ -3142,10 +3150,10 @@ export default function InspectionCameraScreen() {
               />
             </TouchableOpacity>
 
-            {/* Notes button — always opens the notes log (with inline add) */}
+            {/* Notes button — go directly to add if no notes, otherwise show log */}
             <TouchableOpacity
               style={[styles.utilityButton, styles.utilityButtonWide]}
-              onPress={() => setShowNotesLogModal(true)}
+              onPress={() => manualNotes.length > 0 ? setShowNotesLogModal(true) : handleAddNote()}
               activeOpacity={0.7}
               accessibilityRole="button"
               accessibilityLabel={
@@ -3582,7 +3590,7 @@ const styles = StyleSheet.create({
   },
   captureHintText: {
     color: "#fff",
-    fontSize: 12,
+    fontSize: 14,
     fontWeight: "600",
   },
   captureButton: {

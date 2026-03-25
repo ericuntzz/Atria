@@ -57,7 +57,7 @@ function formatGenericLabel(
   if (imageType === "overview") return `Wide view${suffix}`;
   if (imageType === "required_detail") return `Close-up${suffix}`;
   if (imageType === "detail") return `Detail${suffix}`;
-  return viewNumber ? `Spot ${viewNumber}` : "Spot to check";
+  return viewNumber ? `Area ${viewNumber}` : "Area to check";
 }
 
 function getGenericLabelMatch(label: string): RegExpMatchArray | null {
