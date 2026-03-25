@@ -908,8 +908,9 @@ export async function analyzeWithAI(
   }
 
   const parsed = parseComparisonResponse(rawText);
+  const hasFindings = parsed.findings.length > 0;
   return {
-    status: "localized_changed",
+    status: hasFindings ? "localized_changed" : "localized_no_change",
     findings: parsed.findings,
     summary: parsed.summary,
     readiness_score: parsed.readiness_score,
@@ -1039,9 +1040,3 @@ function inferMediaTypeFromDataUri(base64OrDataUri: string): string | null {
   return mediaType || null;
 }
 
-function envNumber(name: string, fallback: number): number {
-  const value = process.env[name];
-  if (!value) return fallback;
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : fallback;
-}

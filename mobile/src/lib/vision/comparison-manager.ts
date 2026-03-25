@@ -422,7 +422,11 @@ export class ComparisonManager {
       // so we always fall back to batch parsing via res.text().
       // The on-device coverage credit (ONNX embeddings) provides the fast path;
       // SSE results from the server are for AI damage detection, not coverage timing.
-      const text = await res.text();
+      // Wrap with timeout to prevent hung server from blocking comparison slot indefinitely.
+      const bodyTimeout = new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("SSE body read timeout")), 120_000),
+      );
+      const text = await Promise.race([res.text(), bodyTimeout]);
       if (isStale()) return;
 
       const events = text.replace(/\r\n/g, "\n").split("\n\n");
