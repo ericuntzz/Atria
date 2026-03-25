@@ -682,6 +682,7 @@ export async function POST(
           : roomData.imageClassifications && typeof roomData.imageClassifications === "object"
             ? (roomData.imageClassifications as Record<string, { type?: string; parent_url?: string | null; detail_subject?: string | null }>)
             : {};
+      console.log(`[train] Room "${roomName}" classifications from AI: ${Object.keys(roomImageClassifications).length} entries`);
       let baselineCount = 0;
       const insertedBaselinesByUrl: Array<{ id: string; imageUrl: string }> = [];
 
@@ -713,6 +714,38 @@ export async function POST(
       }
 
       // Store image classification metadata (overview/detail/standard + parent-child links)
+      // If Claude didn't provide classifications, infer from labels
+      if (Object.keys(roomImageClassifications).length === 0 && insertedBaselinesByUrl.length > 1) {
+        console.log(`[train] No image_classifications from AI for "${roomName}" — inferring from labels`);
+        // Find the overview (widest/most general shot) and mark close-ups as detail
+        const CLOSEUP_PATTERNS = /close[- ]?up|detail|interior|inside|under|behind|beneath/i;
+        const OVERVIEW_PATTERNS = /overview|wide|full|entire|main|entry|general/i;
+        let overviewUrl: string | null = null;
+
+        for (const { imageUrl } of insertedBaselinesByUrl) {
+          const label = roomImageLabels[imageUrl] || "";
+          if (OVERVIEW_PATTERNS.test(label)) {
+            overviewUrl = imageUrl;
+            break;
+          }
+        }
+        // If no explicit overview found, use the first baseline as the implicit overview
+        if (!overviewUrl && insertedBaselinesByUrl.length > 0) {
+          overviewUrl = insertedBaselinesByUrl[0].imageUrl;
+        }
+
+        for (const { imageUrl } of insertedBaselinesByUrl) {
+          const label = roomImageLabels[imageUrl] || "";
+          if (CLOSEUP_PATTERNS.test(label) && imageUrl !== overviewUrl) {
+            roomImageClassifications[imageUrl] = {
+              type: "detail",
+              parent_url: overviewUrl,
+              detail_subject: label,
+            };
+          }
+        }
+      }
+
       if (Object.keys(roomImageClassifications).length > 0 && insertedBaselinesByUrl.length > 0) {
         for (const { id, imageUrl } of insertedBaselinesByUrl) {
           const classification = roomImageClassifications[imageUrl];
