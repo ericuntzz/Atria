@@ -88,8 +88,11 @@ export function createVoiceNoteRecorder(
     }
   };
 
+  let stopping = false; // Guard against race between auto-stop and manual stop
+
   const stopRecording = async (): Promise<VoiceNoteResult | null> => {
-    if (!recording) return null;
+    if (!recording || stopping) return null;
+    stopping = true;
 
     if (autoStopTimer) {
       clearTimeout(autoStopTimer);
@@ -121,6 +124,8 @@ export function createVoiceNoteRecorder(
       console.warn("[VoiceNotes] Failed to stop recording:", err);
       recording = null;
       return null;
+    } finally {
+      stopping = false;
     }
   };
 
@@ -171,13 +176,13 @@ async function transcribeAudio(
     const token = await getAuthToken();
     if (!token) return "";
 
-    // Read the audio file
-    const response = await fetch(audioUri);
-    const blob = await response.blob();
-
-    // Upload to transcription endpoint
+    // React Native FormData requires URI-based objects, not Blob
     const formData = new FormData();
-    formData.append("audio", blob, "voice-note.m4a");
+    formData.append("audio", {
+      uri: audioUri,
+      type: "audio/m4a",
+      name: "voice-note.m4a",
+    } as unknown as Blob); // RN FormData accepts this shape
 
     const transcribeRes = await fetch(`${apiUrl}/api/vision/transcribe`, {
       method: "POST",

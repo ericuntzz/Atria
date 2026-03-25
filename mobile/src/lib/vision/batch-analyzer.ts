@@ -1,19 +1,14 @@
 /**
  * Batch Analyzer — Sliding Window Scene Analysis
  *
- * Instead of sending individual frames to Claude one at a time,
- * accumulates frames into batches and sends them together for
- * holistic scene-graph analysis. This gives Claude full context
- * to detect changes that are only visible across multiple angles.
- *
- * Two modes:
- * 1. Sliding window: every N frames, send a batch
- * 2. Room transition: when room changes, send all accumulated frames
+ * Accumulates frames into batches and sends them together for
+ * holistic scene-graph analysis via Claude. Gives Claude full context
+ * to detect changes visible across multiple angles.
  */
 
 export interface BatchFrame {
-  dataUri: string; // base64 data URI
-  baselineUrl: string; // corresponding baseline image URL
+  dataUri: string;
+  baselineUrl: string;
   roomId: string;
   roomName: string;
   baselineId: string;
@@ -22,18 +17,19 @@ export interface BatchFrame {
 }
 
 export interface BatchAnalysisConfig {
-  /** Number of frames to accumulate before sending a batch (default: 5) */
   batchSize: number;
-  /** Maximum time to wait before sending an incomplete batch (ms) */
   maxBatchWaitMs: number;
-  /** API base URL */
   apiUrl: string;
+  maxConcurrentBatches: number;
+  getAuthToken: () => Promise<string | null>;
 }
 
 const DEFAULT_CONFIG: BatchAnalysisConfig = {
   batchSize: 5,
-  maxBatchWaitMs: 30000, // 30 seconds
+  maxBatchWaitMs: 30000,
   apiUrl: "",
+  maxConcurrentBatches: 2,
+  getAuthToken: async () => null,
 };
 
 export type BatchResultCallback = (result: {
@@ -52,10 +48,13 @@ export type BatchResultCallback = (result: {
 
 export class BatchAnalyzer {
   private config: BatchAnalysisConfig;
-  private frameBuffer: Map<string, BatchFrame[]> = new Map(); // roomId -> frames
-  private batchTimer: ReturnType<typeof setTimeout> | null = null;
+  private frameBuffer: Map<string, BatchFrame[]> = new Map();
+  /** Per-room timers instead of single shared timer */
+  private roomTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
   private onResult: BatchResultCallback | null = null;
   private paused = false;
+  /** Backpressure: track in-flight batch count */
+  private activeBatches = 0;
 
   constructor(config?: Partial<BatchAnalysisConfig>) {
     this.config = { ...DEFAULT_CONFIG, ...config };
@@ -65,76 +64,98 @@ export class BatchAnalyzer {
     this.onResult = callback;
   }
 
-  /**
-   * Add a captured frame to the buffer.
-   * When the buffer reaches batchSize, automatically triggers batch analysis.
-   */
   addFrame(frame: BatchFrame): void {
     if (this.paused) return;
 
     const roomFrames = this.frameBuffer.get(frame.roomId) || [];
+
+    // Dedup: skip if a frame with the same capturedAt already exists
+    if (roomFrames.some((f) => f.capturedAt === frame.capturedAt)) return;
+
     roomFrames.push(frame);
     this.frameBuffer.set(frame.roomId, roomFrames);
 
-    // Check if we should send a batch
     if (roomFrames.length >= this.config.batchSize) {
       this.flushRoom(frame.roomId);
-    } else if (!this.batchTimer) {
-      // Start a timer for incomplete batches
-      this.batchTimer = setTimeout(() => {
-        this.batchTimer = null;
-        this.flushAllRooms();
+    } else if (!this.roomTimers.has(frame.roomId)) {
+      // Per-room timer
+      const timer = setTimeout(() => {
+        this.roomTimers.delete(frame.roomId);
+        this.flushRoom(frame.roomId);
       }, this.config.maxBatchWaitMs);
+      this.roomTimers.set(frame.roomId, timer);
     }
   }
 
-  /**
-   * Called when room transition is detected — flush the previous room's frames.
-   */
   onRoomTransition(previousRoomId: string): void {
+    // Clear the room's timer and flush
+    const timer = this.roomTimers.get(previousRoomId);
+    if (timer) {
+      clearTimeout(timer);
+      this.roomTimers.delete(previousRoomId);
+    }
     this.flushRoom(previousRoomId);
   }
 
-  /**
-   * Flush all frames for a specific room as a batch.
-   */
   private flushRoom(roomId: string): void {
     const frames = this.frameBuffer.get(roomId);
     if (!frames || frames.length === 0) return;
 
-    // Take the frames and clear the buffer
-    this.frameBuffer.set(roomId, []);
-    this.sendBatch(roomId, frames);
+    // Clear timer for this room
+    const timer = this.roomTimers.get(roomId);
+    if (timer) {
+      clearTimeout(timer);
+      this.roomTimers.delete(roomId);
+    }
+
+    this.frameBuffer.delete(roomId); // delete instead of empty array
+    void this.sendBatchWithBackpressure(roomId, frames);
   }
 
-  /**
-   * Flush all rooms (e.g., on inspection end or timer expiry).
-   */
   flushAllRooms(): void {
     for (const [roomId, frames] of this.frameBuffer) {
       if (frames.length > 0) {
-        this.frameBuffer.set(roomId, []);
-        this.sendBatch(roomId, frames);
+        this.frameBuffer.delete(roomId);
+        void this.sendBatchWithBackpressure(roomId, frames);
       }
     }
-    if (this.batchTimer) {
-      clearTimeout(this.batchTimer);
-      this.batchTimer = null;
+    // Clear all room timers
+    for (const [, timer] of this.roomTimers) {
+      clearTimeout(timer);
     }
+    this.roomTimers.clear();
   }
 
-  /**
-   * Send a batch of frames to the server for holistic Claude analysis.
-   */
+  /** Backpressure: queue batch if too many are in flight */
+  private async sendBatchWithBackpressure(roomId: string, frames: BatchFrame[]): Promise<void> {
+    if (this.activeBatches >= this.config.maxConcurrentBatches) {
+      console.log(`[BatchAnalyzer] Backpressure: ${this.activeBatches} batches in flight, deferring ${roomId}`);
+      // Re-queue frames for next flush
+      const existing = this.frameBuffer.get(roomId) || [];
+      this.frameBuffer.set(roomId, [...existing, ...frames]);
+      return;
+    }
+    await this.sendBatch(roomId, frames);
+  }
+
   private async sendBatch(roomId: string, frames: BatchFrame[]): Promise<void> {
     if (frames.length === 0) return;
 
+    this.activeBatches++;
     const roomName = frames[0].roomName;
 
     try {
+      const token = await this.config.getAuthToken();
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+      };
+      if (token) {
+        headers["Authorization"] = `Bearer ${token}`;
+      }
+
       const response = await fetch(`${this.config.apiUrl}/api/vision/batch-analyze`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers,
         body: JSON.stringify({
           roomId,
           roomName,
@@ -161,6 +182,8 @@ export class BatchAnalyzer {
       });
     } catch (err) {
       console.warn("[BatchAnalyzer] Batch analysis failed:", err);
+    } finally {
+      this.activeBatches = Math.max(0, this.activeBatches - 1);
     }
   }
 
@@ -175,19 +198,17 @@ export class BatchAnalyzer {
   dispose(): void {
     this.paused = true;
     this.frameBuffer.clear();
-    if (this.batchTimer) {
-      clearTimeout(this.batchTimer);
-      this.batchTimer = null;
+    for (const [, timer] of this.roomTimers) {
+      clearTimeout(timer);
     }
+    this.roomTimers.clear();
     this.onResult = null;
   }
 
-  /** Get pending frame count for a room */
   getPendingFrameCount(roomId: string): number {
     return this.frameBuffer.get(roomId)?.length || 0;
   }
 
-  /** Get total pending frames across all rooms */
   getTotalPendingFrames(): number {
     let total = 0;
     for (const frames of this.frameBuffer.values()) {

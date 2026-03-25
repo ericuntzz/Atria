@@ -57,8 +57,14 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Limit batch size to prevent abuse
+    // Validate payload size before processing — reject oversized requests early
     const maxFrames = 10;
+    if (frames.length > 50) {
+      return NextResponse.json(
+        { error: `Too many frames (${frames.length}). Maximum is ${maxFrames}.` },
+        { status: 400 },
+      );
+    }
     const batchFrames = frames.slice(0, maxFrames);
 
     const anthropicKey = process.env.CLAUDE_API_KEY;
@@ -107,35 +113,40 @@ Return ONLY valid JSON:
       },
     ];
 
+    // Fetch all baseline images in parallel (P1 fix: was sequential)
+    const ALLOWED_MEDIA_TYPES = new Set(["image/jpeg", "image/png", "image/gif", "image/webp"]);
+    const baselineResults = await Promise.allSettled(
+      batchFrames.map(async (frame) => {
+        try {
+          const res = await fetch(frame.baselineUrl, { signal: AbortSignal.timeout(15000) });
+          if (!res.ok) return null;
+          const buffer = await res.arrayBuffer();
+          const rawType = (res.headers.get("content-type") || "image/jpeg").split(";")[0].trim();
+          const mediaType = ALLOWED_MEDIA_TYPES.has(rawType) ? rawType : "image/jpeg";
+          return { base64: Buffer.from(buffer).toString("base64"), mediaType };
+        } catch { return null; }
+      }),
+    );
+
     // Add baseline + current image pairs
     for (let i = 0; i < batchFrames.length; i++) {
       const frame = batchFrames[i];
       const angleLabel = frame.label || `Angle ${i + 1}`;
+      const settled = baselineResults[i];
+      const baselineData = settled.status === "fulfilled" ? settled.value : null;
 
-      // Fetch baseline image
-      try {
-        const baselineRes = await fetch(frame.baselineUrl, {
-          signal: AbortSignal.timeout(15000),
-        });
-        if (baselineRes.ok) {
-          const baselineBuffer = await baselineRes.arrayBuffer();
-          const baselineBase64 = Buffer.from(baselineBuffer).toString("base64");
-          const baselineContentType = baselineRes.headers.get("content-type") || "image/jpeg";
-
-          content.push(
-            { type: "text", text: `\n--- ${angleLabel} (BASELINE - how it should look) ---` },
-            {
-              type: "image",
-              source: {
-                type: "base64",
-                media_type: baselineContentType.split(";")[0].trim(),
-                data: baselineBase64,
-              },
-            },
-          );
-        }
-      } catch {
-        // Skip failed baseline fetches
+      if (baselineData) {
+        content.push(
+          { type: "text", text: `\n--- ${angleLabel} (BASELINE - how it should look) ---` },
+          {
+            type: "image",
+            source: { type: "base64", media_type: baselineData.mediaType, data: baselineData.base64 },
+          },
+        );
+      } else {
+        content.push(
+          { type: "text", text: `\n--- ${angleLabel} (BASELINE unavailable — analyze current image only) ---` },
+        );
       }
 
       // Add current image
@@ -144,11 +155,7 @@ Return ONLY valid JSON:
         { type: "text", text: `--- ${angleLabel} (CURRENT - how it looks now) ---` },
         {
           type: "image",
-          source: {
-            type: "base64",
-            media_type: "image/jpeg",
-            data: currentBase64,
-          },
+          source: { type: "base64", media_type: "image/jpeg", data: currentBase64 },
         },
       );
     }
