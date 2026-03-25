@@ -91,7 +91,7 @@ export function createVoiceNoteRecorder(
   let stopping = false; // Guard against race between auto-stop and manual stop
 
   const stopRecording = async (): Promise<VoiceNoteResult | null> => {
-    if (!recording || stopping) return null;
+    if (!recording || stopping || disposed) return null;
     stopping = true;
 
     if (autoStopTimer) {
@@ -130,7 +130,7 @@ export function createVoiceNoteRecorder(
   };
 
   const cancelRecording = async (): Promise<void> => {
-    if (!recording) return;
+    if (!recording || stopping) return; // Guard against race with stopRecording + disposed state
 
     if (autoStopTimer) {
       clearTimeout(autoStopTimer);
@@ -144,9 +144,13 @@ export function createVoiceNoteRecorder(
     }
     recording = null;
 
-    await Audio.setAudioModeAsync({
-      allowsRecordingIOS: false,
-    });
+    try {
+      await Audio.setAudioModeAsync({
+        allowsRecordingIOS: false,
+      });
+    } catch {
+      // Ignore — audio session may be in a bad state, don't let it propagate
+    }
   };
 
   return {

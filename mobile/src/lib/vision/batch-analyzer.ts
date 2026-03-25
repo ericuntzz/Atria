@@ -128,13 +128,20 @@ export class BatchAnalyzer {
     this.roomTimers.clear();
   }
 
-  /** Backpressure: queue batch if too many are in flight */
+  /** Backpressure: queue batch if too many are in flight, with retry timer */
   private async sendBatchWithBackpressure(roomId: string, frames: BatchFrame[]): Promise<void> {
     if (this.activeBatches >= this.config.maxConcurrentBatches) {
       console.log(`[BatchAnalyzer] Backpressure: ${this.activeBatches} batches in flight, deferring ${roomId}`);
-      // Re-queue frames for next flush
       const existing = this.frameBuffer.get(roomId) || [];
       this.frameBuffer.set(roomId, [...existing, ...frames]);
+      // Set a retry timer so re-queued frames aren't orphaned
+      if (!this.roomTimers.has(roomId)) {
+        const retryTimer = setTimeout(() => {
+          this.roomTimers.delete(roomId);
+          this.flushRoom(roomId);
+        }, 5000); // Retry after 5s
+        this.roomTimers.set(roomId, retryTimer);
+      }
       return;
     }
     await this.sendBatch(roomId, frames);
