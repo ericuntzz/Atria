@@ -2754,21 +2754,7 @@ export default function InspectionCameraScreen() {
       }
     }
 
-    setFindings((prev) => {
-      const remaining = prev.filter((f) => f.id !== findingId);
-      // If no remaining active findings, clear all issue markers so amber dots revert to green
-      if (remaining.length === 0) {
-        issueBaselinesRef.current.clear();
-      }
-      // Refresh coverage UI to update tri-state dots
-      const currentRoomId = session?.getState().currentRoomId;
-      if (currentRoomId) {
-        setTimeout(() => {
-          if (sessionRef.current) updateCoverageUI(sessionRef.current, currentRoomId);
-        }, 100);
-      }
-      return remaining;
-    });
+    setFindings((prev) => prev.filter((f) => f.id !== findingId));
     const hint = reason === "not_accurate"
       ? "Dismissed — won't alert on this again"
       : reason === "still_there"
@@ -3096,6 +3082,7 @@ export default function InspectionCameraScreen() {
               roomWaypoints={roomWaypoints}
               roomScannedCount={roomAngles.scanned}
               roomTotalCount={roomAngles.total}
+              activeFindingCount={findings.length}
             />
           </View>
         </SafeAreaView>

@@ -20,6 +20,8 @@ interface Props {
   roomWaypoints?: RoomWaypoint[];
   roomScannedCount?: number;
   roomTotalCount?: number;
+  /** Number of active (non-dismissed) finding cards — used for headline count */
+  activeFindingCount?: number;
 }
 
 export default function CoverageTracker({
@@ -27,6 +29,7 @@ export default function CoverageTracker({
   roomWaypoints,
   roomScannedCount,
   roomTotalCount,
+  activeFindingCount = 0,
 }: Props) {
   const [expandedPreviewUrl, setExpandedPreviewUrl] = useState<string | null>(null);
   const clampedCoverage = Math.min(100, Math.max(0, coverage));
@@ -55,13 +58,15 @@ export default function CoverageTracker({
   const analyzingCount = capturedWaypoints.filter(w => w.state === "analyzing").length;
   const issueCount = capturedWaypoints.filter(w => w.state === "issue_found").length;
 
+  // Use activeFindingCount (actual finding cards) for headline, not waypoint issue dots
+  const effectiveIssueCount = activeFindingCount > 0 ? activeFindingCount : issueCount;
   const roomCompleteSubtext =
-    analyzingCount > 0 && issueCount > 0
-      ? `${analyzingCount} analyzing, ${issueCount} issue${issueCount > 1 ? "s" : ""} found`
+    analyzingCount > 0 && effectiveIssueCount > 0
+      ? `${analyzingCount} analyzing, ${effectiveIssueCount} issue${effectiveIssueCount > 1 ? "s" : ""} found`
       : analyzingCount > 0
         ? `${analyzingCount} analyzing`
-        : issueCount > 0
-          ? `${issueCount} issue${issueCount > 1 ? "s" : ""} found`
+        : effectiveIssueCount > 0
+          ? `${effectiveIssueCount} issue${effectiveIssueCount > 1 ? "s" : ""} found`
           : "Keep scanning for detail or tap End";
 
   const trackerHeadline =

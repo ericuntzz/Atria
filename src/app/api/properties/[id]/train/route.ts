@@ -149,9 +149,9 @@ async function maybeClassifyBaselines(
 
   const hasClassification = stored.some(b => {
     const m = (b.metadata || {}) as Record<string, unknown>;
-    return m.imageType && m.imageType !== "standard";
+    return !!m.imageType; // Any imageType (even "standard") means classification already ran
   });
-  if (hasClassification) return; // Already classified
+  if (hasClassification) return;
 
   console.log(`[train] Room "${roomName}": no classifications found — running classification pass`);
 
@@ -265,6 +265,18 @@ Return ONLY valid JSON:
         })
         .where(eq(baselineImages.id, baseline.id));
       updated++;
+    }
+
+    // If no classifications were written, mark the first baseline as "standard"
+    // so the check above prevents redundant re-runs
+    if (updated === 0 && stored.length > 0) {
+      const first = stored[0];
+      const existingMeta = (first.metadata || {}) as Record<string, unknown>;
+      if (!existingMeta.imageType) {
+        await db.update(baselineImages)
+          .set({ metadata: { ...existingMeta, imageType: "standard" as const } })
+          .where(eq(baselineImages.id, first.id));
+      }
     }
 
     console.log(`[train] Classification pass: updated ${updated}/${stored.length} baselines for "${roomName}"`);
