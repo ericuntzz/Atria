@@ -319,11 +319,6 @@ export class RoomDetector {
       const clusterSize = new Map<string, number>();
       for (const b of roomBaselines) clusterSize.set(b.id, 1);
 
-      const getSize = (id: string) => {
-        const root = find(id);
-        return clusterSize.get(root) || 1;
-      };
-
       // Pairwise similarity check (sorted by descending similarity for best merges first)
       const pairs: { i: number; j: number; sim: number }[] = [];
       for (let i = 0; i < roomBaselines.length; i++) {

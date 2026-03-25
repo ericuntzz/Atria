@@ -598,33 +598,37 @@ export default function InspectionCameraScreen() {
       // Grant coverage credit (directional hierarchy rules apply)
       if (resolvedBaselineId) {
         hasFirstMatchRef.current = true;
+        // Mark in onDeviceCreditedRef so on-device loop won't re-credit/re-haptic
+        onDeviceCreditedRef.current.add(resolvedBaselineId);
+
         if (event.verificationMode === "user_confirmed_bypass") {
           session.recordAngleScan(resolvedRoomId, resolvedBaselineId);
           roomDetectorRef.current?.markAngleScanned(resolvedBaselineId, resolvedRoomId);
         } else {
           // Completion credit: only the matched baseline + cluster peers
-          // These count toward room progress percentage.
           const clusterIds = roomDetectorRef.current?.getClusterMembers(resolvedBaselineId) || [resolvedBaselineId];
           for (const cid of clusterIds) {
             session.recordAngleScan(resolvedRoomId, cid);
             roomDetectorRef.current?.markAngleScanned(cid, resolvedRoomId);
+            onDeviceCreditedRef.current.add(cid);
           }
 
-          // UI-only credit: hierarchy parent/children get marked as "seen"
-          // in the detector (green dots) but NOT in the session (no completion credit).
-            const hierarchy = roomDetectorRef.current?.getHierarchy(resolvedBaselineId);
-            if (hierarchy) {
-              if (hierarchy.parentId) {
-                roomDetectorRef.current?.markAngleScanned(hierarchy.parentId, resolvedRoomId, {
-                  countsForCompletion: false,
-                });
-              }
-              for (const childId of hierarchy.childIds) {
-                roomDetectorRef.current?.markAngleScanned(childId, resolvedRoomId, {
-                  countsForCompletion: false,
-                });
-              }
+          // UI-only credit: hierarchy parent/children marked as "seen"
+          const hierarchy = roomDetectorRef.current?.getHierarchy(resolvedBaselineId);
+          if (hierarchy) {
+            if (hierarchy.parentId) {
+              roomDetectorRef.current?.markAngleScanned(hierarchy.parentId, resolvedRoomId, {
+                countsForCompletion: false,
+              });
+              onDeviceCreditedRef.current.add(hierarchy.parentId);
             }
+            for (const childId of hierarchy.childIds) {
+              roomDetectorRef.current?.markAngleScanned(childId, resolvedRoomId, {
+                countsForCompletion: false,
+              });
+              onDeviceCreditedRef.current.add(childId);
+            }
+          }
         }
         updateCoverageUI(session, resolvedRoomId);
       }
@@ -757,26 +761,30 @@ export default function InspectionCameraScreen() {
       const onDeviceAlreadyCredited = resolvedBaselineId ? onDeviceCreditedRef.current.has(resolvedBaselineId) : false;
       if (resolvedBaselineId && !alreadyCredited && !onDeviceAlreadyCredited) {
         hasFirstMatchRef.current = true;
+        onDeviceCreditedRef.current.add(resolvedBaselineId);
+
         // Completion credit: matched baseline + cluster peers only
         const clusterIds = roomDetectorRef.current?.getClusterMembers(resolvedBaselineId) || [resolvedBaselineId];
         for (const cid of clusterIds) {
           session.recordAngleScan(resolvedRoomId, cid);
           roomDetectorRef.current?.markAngleScanned(cid, resolvedRoomId);
+          onDeviceCreditedRef.current.add(cid);
         }
 
         // UI-only credit: hierarchy parent/children marked as "seen" in detector
-        // but NOT in session — does not count toward completion percentage.
         const hierarchy = roomDetectorRef.current?.getHierarchy(resolvedBaselineId);
         if (hierarchy) {
           if (hierarchy.parentId) {
             roomDetectorRef.current?.markAngleScanned(hierarchy.parentId, resolvedRoomId, {
               countsForCompletion: false,
             });
+            onDeviceCreditedRef.current.add(hierarchy.parentId);
           }
           for (const childId of hierarchy.childIds) {
             roomDetectorRef.current?.markAngleScanned(childId, resolvedRoomId, {
               countsForCompletion: false,
             });
+            onDeviceCreditedRef.current.add(childId);
           }
         }
         updateCoverageUI(session, resolvedRoomId);
