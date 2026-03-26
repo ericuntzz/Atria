@@ -58,6 +58,7 @@ import { getInspectionDisplayLabel } from "../lib/inspection/display-labels";
 import type { ImageSourceType } from "../lib/image-source/types";
 import { InspectionAnnouncer } from "../lib/audio/inspection-announcer";
 import { BatchAnalyzer } from "../lib/vision/batch-analyzer";
+import { createVoiceNoteRecorder, type VoiceNoteRecorder } from "../lib/audio/voice-notes";
 
 type Nav = NativeStackNavigationProp<RootStackParamList, "InspectionCamera">;
 type CameraRoute = RouteProp<RootStackParamList, "InspectionCamera">;
@@ -220,6 +221,8 @@ export default function InspectionCameraScreen() {
   const [showNotesLogModal, setShowNotesLogModal] = useState(false);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
   const [noteText, setNoteText] = useState("");
+  const [isRecordingVoice, setIsRecordingVoice] = useState(false);
+  const voiceRecorderRef = useRef<VoiceNoteRecorder | null>(null);
   const [captureHint, setCaptureHint] = useState<string | null>(null);
   const [localizationState, setLocalizationState] = useState<LocalizationState>("not_localized");
   const [lockedBaselineInfo, setLockedBaselineInfo] = useState<{
@@ -608,6 +611,16 @@ export default function InspectionCameraScreen() {
       }
     });
     batchAnalyzerRef.current = batchAnalyzer;
+
+    // Initialize voice recorder (optional — degrades gracefully if unavailable)
+    const voiceRecorder = createVoiceNoteRecorder(
+      process.env.EXPO_PUBLIC_API_URL || "",
+      async () => {
+        const { data } = await supabase.auth.getSession();
+        return data.session?.access_token || null;
+      },
+    );
+    voiceRecorderRef.current = voiceRecorder;
 
     // Initialize room detector
     const roomDetector = new RoomDetector();
@@ -1164,6 +1177,8 @@ export default function InspectionCameraScreen() {
       pendingBatchFramesRef.current.clear();
       batchAnalyzerRef.current?.dispose();
       batchAnalyzerRef.current = null;
+      voiceRecorderRef.current?.dispose();
+      voiceRecorderRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -3444,8 +3459,49 @@ export default function InspectionCameraScreen() {
             <View style={styles.noteModalContent}>
               <Text style={styles.noteModalTitle}>Add Note</Text>
               <Text style={styles.noteModalSubtitle}>
-                Describe the issue you see
+                Describe the issue you see, or tap the mic to dictate
               </Text>
+              {/* Voice note button */}
+              {voiceRecorderRef.current?.isAvailable && (
+                <TouchableOpacity
+                  style={{
+                    flexDirection: "row",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    gap: 8,
+                    paddingVertical: 10,
+                    paddingHorizontal: 16,
+                    borderRadius: 20,
+                    backgroundColor: isRecordingVoice ? "#DC2626" : "rgba(35,114,184,0.1)",
+                    alignSelf: "center",
+                    marginBottom: 8,
+                  }}
+                  onPress={async () => {
+                    const recorder = voiceRecorderRef.current;
+                    if (!recorder) return;
+                    if (isRecordingVoice) {
+                      setIsRecordingVoice(false);
+                      const result = await recorder.stopRecording();
+                      if (result?.transcript) {
+                        setNoteText((prev) => prev ? `${prev}\n${result.transcript}` : result.transcript);
+                      }
+                    } else {
+                      const started = await recorder.startRecording();
+                      if (started) setIsRecordingVoice(true);
+                    }
+                  }}
+                  activeOpacity={0.7}
+                >
+                  <Ionicons
+                    name={isRecordingVoice ? "stop-circle" : "mic"}
+                    size={20}
+                    color={isRecordingVoice ? "#fff" : "#2372B8"}
+                  />
+                  <Text style={{ color: isRecordingVoice ? "#fff" : "#2372B8", fontWeight: "600", fontSize: 14 }}>
+                    {isRecordingVoice ? "Stop Recording" : "Tap to Dictate"}
+                  </Text>
+                </TouchableOpacity>
+              )}
               <TextInput
                 style={styles.noteInput}
                 placeholder="e.g. Water stain on ceiling near AC vent"
