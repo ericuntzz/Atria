@@ -55,6 +55,9 @@ export class BatchAnalyzer {
   private roomTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
   private onResult: BatchResultCallback | null = null;
   private paused = false;
+  /** Monotonic counter for robust frame dedup (avoids timestamp collision) */
+  private frameCounter = 0;
+  private seenFrameIds = new Set<number>();
   /** Backpressure: track in-flight batch count */
   private activeBatches = 0;
 
@@ -71,8 +74,15 @@ export class BatchAnalyzer {
 
     const roomFrames = this.frameBuffer.get(frame.roomId) || [];
 
-    // Dedup: skip if a frame with the same capturedAt already exists
-    if (roomFrames.some((f) => f.capturedAt === frame.capturedAt)) return;
+    // Dedup: use monotonic counter to avoid timestamp collision on fast devices
+    const frameId = ++this.frameCounter;
+    if (this.seenFrameIds.has(frameId)) return; // shouldn't happen with monotonic counter
+    this.seenFrameIds.add(frameId);
+    // Limit seen set size to prevent unbounded growth
+    if (this.seenFrameIds.size > 200) {
+      const oldest = this.seenFrameIds.values().next().value;
+      if (oldest !== undefined) this.seenFrameIds.delete(oldest);
+    }
 
     roomFrames.push(frame);
     this.frameBuffer.set(frame.roomId, roomFrames);

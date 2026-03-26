@@ -12,12 +12,20 @@ interface AppLayoutProps {
 export function AppLayout({ userEmail, children, mobileNav }: AppLayoutProps) {
   return (
     <div className="flex h-screen bg-background overflow-hidden">
-      {/* Desktop sidebar — hidden on mobile */}
-      <div className="hidden lg:flex h-full">
-        <Sidebar userEmail={userEmail} />
-      </div>
+      {/* Skip to content link — visible only on keyboard focus */}
+      <a
+        href="#main-content"
+        className="sr-only focus:not-sr-only focus:absolute focus:top-4 focus:left-4 focus:z-50 focus:bg-primary focus:text-primary-foreground focus:px-4 focus:py-2 focus:rounded-lg focus:text-sm focus:font-medium"
+      >
+        Skip to content
+      </a>
 
-      <main className="flex-1 overflow-y-auto pb-20 lg:pb-0">
+      {/* Desktop sidebar — hidden on mobile */}
+      <header className="hidden lg:flex h-full" role="banner">
+        <Sidebar userEmail={userEmail} />
+      </header>
+
+      <main id="main-content" className="flex-1 overflow-y-auto pb-20 lg:pb-0">
         {children}
       </main>
 

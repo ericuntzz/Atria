@@ -685,11 +685,23 @@ export default function PropertyTrainingScreen() {
       return [];
     }
 
+    // Get video duration for dynamic timestamp generation
+    let videoDurationMs: number | undefined;
+    try {
+      const { Audio } = await import("expo-av");
+      const { sound } = await Audio.Sound.createAsync({ uri: videoUri });
+      const status = await sound.getStatusAsync();
+      if (status.isLoaded && status.durationMillis) {
+        videoDurationMs = status.durationMillis;
+      }
+      await sound.unloadAsync();
+    } catch { /* duration unavailable — use base timestamps */ }
+
     // Phase 1: Extract ALL candidate frames at each timestamp
     const candidates: Array<{ uri: string; time: number; sharpness: number }> = [];
     const seen = new Set<string>();
 
-    const timestamps = generateKeyframeTimestamps();
+    const timestamps = generateKeyframeTimestamps(videoDurationMs);
     for (const time of timestamps) {
       try {
         const thumb = await videoThumbnails.getThumbnailAsync(videoUri, {
