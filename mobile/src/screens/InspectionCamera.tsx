@@ -671,6 +671,7 @@ export default function InspectionCameraScreen() {
         return data.session?.access_token || null;
       },
       inspectionMode,
+      knownConditions: globalKnownConditionsRef.current || [],
     });
     batchAnalyzer.setResultCallback((result) => {
       if (!isMountedRef.current) return;

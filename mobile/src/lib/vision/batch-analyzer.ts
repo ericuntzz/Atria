@@ -24,6 +24,8 @@ export interface BatchAnalysisConfig {
   getAuthToken: () => Promise<string | null>;
   /** Inspection mode for mode-specific Claude prompting */
   inspectionMode?: "turnover" | "maintenance" | "owner_arrival" | "vacancy_check";
+  /** Known conditions to suppress in batch analysis (prevents re-alerting on dismissed findings) */
+  knownConditions?: string[];
 }
 
 const DEFAULT_CONFIG: BatchAnalysisConfig = {
@@ -67,6 +69,11 @@ export class BatchAnalyzer {
 
   setResultCallback(callback: BatchResultCallback): void {
     this.onResult = callback;
+  }
+
+  /** Update known conditions dynamically (e.g., after user dismisses a finding) */
+  updateKnownConditions(conditions: string[]): void {
+    this.config.knownConditions = conditions;
   }
 
   addFrame(frame: BatchFrame): void {
@@ -181,6 +188,7 @@ export class BatchAnalyzer {
           roomId,
           roomName,
           inspectionMode: this.config.inspectionMode || "turnover",
+          knownConditions: this.config.knownConditions || [],
           frames: frames.map((f) => ({
             currentImage: f.dataUri,
             baselineUrl: f.baselineUrl,
