@@ -123,38 +123,49 @@ export async function POST(
       );
     }
 
-    // Upsert: if same fingerprint already dismissed on this property, increment count
-    if (action === "dismissed") {
-      const [existing] = await db
-        .select({ id: findingFeedback.id, dismissCount: findingFeedback.dismissCount })
-        .from(findingFeedback)
-        .where(
-          and(
-            eq(findingFeedback.propertyId, propertyId),
-            eq(findingFeedback.findingFingerprint, fingerprint),
-            eq(findingFeedback.action, "dismissed"),
-          ),
-        )
-        .limit(1);
+    // Upsert logic: one row per (propertyId, findingFingerprint).
+    // - Dismiss: increment dismissCount, update action to "dismissed"
+    // - Confirm after dismiss: update action to "confirmed", reset dismissCount to 0
+    //   (removes suppression — the user is saying "this IS a real issue")
+    const [existing] = await db
+      .select({
+        id: findingFeedback.id,
+        dismissCount: findingFeedback.dismissCount,
+        action: findingFeedback.action,
+      })
+      .from(findingFeedback)
+      .where(
+        and(
+          eq(findingFeedback.propertyId, propertyId),
+          eq(findingFeedback.findingFingerprint, fingerprint),
+        ),
+      )
+      .limit(1);
 
-      if (existing) {
-        // Increment dismiss count and update reason/timestamp
-        await db
-          .update(findingFeedback)
-          .set({
-            dismissCount: (existing.dismissCount ?? 1) + 1,
-            dismissReason: dismissReason || undefined,
-            updatedAt: new Date(),
-            inspectionId: inspectionId || undefined,
-          })
-          .where(eq(findingFeedback.id, existing.id));
+    if (existing) {
+      const newDismissCount = action === "dismissed"
+        ? (existing.dismissCount ?? 0) + 1
+        : 0; // Confirm resets dismiss count — removes suppression
 
-        return NextResponse.json({
-          id: existing.id,
-          dismissCount: (existing.dismissCount ?? 1) + 1,
-          upserted: true,
-        });
-      }
+      await db
+        .update(findingFeedback)
+        .set({
+          action,
+          dismissCount: newDismissCount,
+          dismissReason: action === "dismissed" ? (dismissReason || null) : null,
+          findingDescription: description, // Update to latest description
+          findingCategory: category || null,
+          findingSeverity: severity || null,
+          updatedAt: new Date(),
+          inspectionId: inspectionId || null,
+        })
+        .where(eq(findingFeedback.id, existing.id));
+
+      return NextResponse.json({
+        id: existing.id,
+        dismissCount: newDismissCount,
+        upserted: true,
+      });
     }
 
     // Insert new feedback
@@ -170,11 +181,16 @@ export async function POST(
         findingCategory: category || null,
         findingSeverity: severity || null,
         action,
-        dismissReason: dismissReason || null,
+        dismissReason: action === "dismissed" ? (dismissReason || null) : null,
+        dismissCount: action === "dismissed" ? 1 : 0,
       })
       .returning({ id: findingFeedback.id });
 
-    return NextResponse.json({ id: inserted?.id, dismissCount: 1, upserted: false }, { status: 201 });
+    return NextResponse.json({
+      id: inserted?.id,
+      dismissCount: action === "dismissed" ? 1 : 0,
+      upserted: false,
+    }, { status: 201 });
   } catch (error) {
     console.error("[properties/[id]/feedback] POST error:", error);
     return NextResponse.json({ error: "Internal server error" }, { status: 500 });

@@ -1553,7 +1553,9 @@ export default function InspectionCameraScreen() {
         getPropertyFeedback(propertyId).then((feedback) => {
           if (!isMountedRef.current) return;
           for (const item of feedback) {
-            if (item.action === "dismissed" && item.findingFingerprint) {
+            // Only suppress findings dismissed 2+ times — matches server-side threshold.
+            // Single dismissals are not yet confident enough to suppress automatically.
+            if (item.action === "dismissed" && item.findingFingerprint && (item.dismissCount ?? 0) >= 2) {
               dismissedFingerprintsRef.current.add(item.findingFingerprint);
             }
           }

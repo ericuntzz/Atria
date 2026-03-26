@@ -188,21 +188,23 @@ export async function POST(request: NextRequest) {
     // Findings dismissed 2+ times on this property are treated as known conditions
     // so Claude Vision doesn't re-alert on them.
     try {
+      const { gte } = await import("drizzle-orm");
       const dismissed = await db
         .select({
           description: findingFeedback.findingDescription,
-          dismissCount: findingFeedback.dismissCount,
         })
         .from(findingFeedback)
         .where(
           and(
             eq(findingFeedback.propertyId, inspectionPropertyId),
             eq(findingFeedback.action, "dismissed"),
+            gte(findingFeedback.dismissCount, 2),
           ),
         );
       for (const d of dismissed) {
-        if (d.description && (d.dismissCount ?? 0) >= 2 && !validatedConditions.includes(d.description)) {
-          validatedConditions.push(`[Previously dismissed] ${d.description}`);
+        const prefixed = `[Previously dismissed] ${d.description}`;
+        if (d.description && !validatedConditions.includes(prefixed)) {
+          validatedConditions.push(prefixed);
         }
       }
     } catch (err) {

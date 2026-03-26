@@ -398,7 +398,7 @@ export const findingFeedback = pgTable("finding_feedback", {
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 }, (table) => [
   index("idx_finding_feedback_property").on(table.propertyId),
-  index("idx_finding_feedback_fingerprint").on(table.propertyId, table.findingFingerprint),
+  uniqueIndex("idx_finding_feedback_unique_fingerprint").on(table.propertyId, table.findingFingerprint),
 ]);
 
 export type FindingFeedback = typeof findingFeedback.$inferSelect;
