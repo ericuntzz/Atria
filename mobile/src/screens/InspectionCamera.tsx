@@ -59,6 +59,8 @@ import type { ImageSourceType } from "../lib/image-source/types";
 import { InspectionAnnouncer } from "../lib/audio/inspection-announcer";
 import { BatchAnalyzer } from "../lib/vision/batch-analyzer";
 import { createVoiceNoteRecorder, type VoiceNoteRecorder } from "../lib/audio/voice-notes";
+import { loadYoloModel, type YoloModelLoader } from "../lib/vision/yolo-model";
+import { ItemTracker } from "../lib/vision/item-tracker";
 
 type Nav = NativeStackNavigationProp<RootStackParamList, "InspectionCamera">;
 type CameraRoute = RouteProp<RootStackParamList, "InspectionCamera">;
@@ -223,6 +225,10 @@ export default function InspectionCameraScreen() {
   const [noteText, setNoteText] = useState("");
   const [isRecordingVoice, setIsRecordingVoice] = useState(false);
   const voiceRecorderRef = useRef<VoiceNoteRecorder | null>(null);
+  const yoloModelRef = useRef<YoloModelLoader | null>(null);
+  const itemTrackerRef = useRef<ItemTracker | null>(null);
+  const yoloTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [detectedItems, setDetectedItems] = useState<string[]>([]);
   const [captureHint, setCaptureHint] = useState<string | null>(null);
   const [localizationState, setLocalizationState] = useState<LocalizationState>("not_localized");
   const [lockedBaselineInfo, setLockedBaselineInfo] = useState<{
@@ -621,6 +627,63 @@ export default function InspectionCameraScreen() {
       },
     );
     voiceRecorderRef.current = voiceRecorder;
+
+    // Initialize YOLO object detector + item tracker (async, non-blocking)
+    // Loads after MobileCLIP to avoid simultaneous ONNX sessions during startup
+    const itemTracker = new ItemTracker();
+    itemTrackerRef.current = itemTracker;
+    // Deferred YOLO load — gives MobileCLIP time to fully initialize first
+    setTimeout(async () => {
+      if (!isMountedRef.current) return;
+      try {
+        const yolo = await loadYoloModel();
+        if (!isMountedRef.current) { yolo.dispose(); return; }
+        yoloModelRef.current = yolo;
+        if (yolo.isLoaded) {
+          console.log("[YOLO] Model loaded — starting object detection loop");
+          // Start YOLO detection loop at 3-second intervals
+          yoloTimerRef.current = setInterval(async () => {
+            if (!isMountedRef.current || pausedRef.current || isCapturingRef.current) return;
+            if (!cameraRef.current || !yoloModelRef.current?.isLoaded) return;
+            try {
+              isCapturingRef.current = true;
+              const photo = await cameraRef.current.takePictureAsync({ quality: 0.3, base64: false });
+              isCapturingRef.current = false;
+              if (!photo?.uri) return;
+              const result = await yoloModelRef.current.detect(photo.uri);
+              FileSystem.deleteAsync(photo.uri, { idempotent: true }).catch(() => {});
+              if (!result || !isMountedRef.current) return;
+              // Feed detections to item tracker
+              const currentRoomId = sessionRef.current?.getState().currentRoomId;
+              if (currentRoomId && itemTrackerRef.current) {
+                itemTrackerRef.current.processDetections(
+                  currentRoomId,
+                  result.propertyRelevantObjects.map(obj => ({
+                    className: obj.className,
+                    confidence: obj.confidence,
+                  })),
+                  Date.now(),
+                );
+                // Update detected items display
+                const coverage = itemTrackerRef.current.getRoomCoverage(currentRoomId);
+                const verified = coverage.total > 0
+                  ? (itemTrackerRef.current.getNextUnverifiedItems(currentRoomId, 0), []) // get verified from total - unverified
+                  : [];
+                void verified; // item names shown via coverage stats for now
+                setDetectedItems(
+                  [`${coverage.verified}/${coverage.total} items verified`],
+                );
+              }
+            } catch (err) {
+              isCapturingRef.current = false;
+              console.warn("[YOLO] Detection error:", err);
+            }
+          }, 3000);
+        }
+      } catch (err) {
+        console.warn("[YOLO] Failed to load:", err);
+      }
+    }, 5000); // 5s delay to let MobileCLIP fully initialize
 
     // Initialize room detector
     const roomDetector = new RoomDetector();
@@ -1179,6 +1242,13 @@ export default function InspectionCameraScreen() {
       batchAnalyzerRef.current = null;
       voiceRecorderRef.current?.dispose();
       voiceRecorderRef.current = null;
+      if (yoloTimerRef.current) {
+        clearInterval(yoloTimerRef.current);
+        yoloTimerRef.current = null;
+      }
+      yoloModelRef.current?.dispose();
+      yoloModelRef.current = null;
+      itemTrackerRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -1535,6 +1605,47 @@ export default function InspectionCameraScreen() {
           roomAnglesMap.set(room.roomId, room.baselines?.length || 0);
         }
         session.setRoomAngles(roomAnglesMap);
+
+        // Load expected items into ItemTracker for YOLO-based verification
+        if (itemTrackerRef.current) {
+          interface ApiItem {
+            id: string;
+            name: string;
+            category?: string | null;
+            importance?: string | null;
+          }
+          const allExpectedItems: Array<{
+            id: string;
+            name: string;
+            category: string;
+            inventoryClass: "fixed_structural" | "durable_movable" | "decorative" | "consumable";
+            importance: "critical" | "high" | "normal" | "low";
+            roomId: string;
+          }> = [];
+          for (const room of (data.rooms || []) as Array<{ id: string; items?: ApiItem[] }>) {
+            for (const item of (room.items || [])) {
+              // Map training category to four-class inventory doctrine
+              const cat = (item.category || "furniture").toLowerCase();
+              const inventoryClass =
+                ["appliance", "fixture"].includes(cat) ? "fixed_structural" as const
+                : ["furniture"].includes(cat) ? "durable_movable" as const
+                : ["decor", "art", "textile"].includes(cat) ? "decorative" as const
+                : ["consumable", "lighting"].includes(cat) ? "consumable" as const
+                : "durable_movable" as const;
+              allExpectedItems.push({
+                id: item.id,
+                name: item.name,
+                category: cat,
+                inventoryClass,
+                importance: (item.importance || "normal") as "critical" | "high" | "normal" | "low",
+                roomId: room.id,
+              });
+            }
+          }
+          if (allExpectedItems.length > 0) {
+            itemTrackerRef.current.loadExpectedItems(allExpectedItems);
+          }
+        }
 
         // Parse known conditions from the same baselines response (avoids extra API call)
         interface ApiCondition {
@@ -2281,6 +2392,10 @@ export default function InspectionCameraScreen() {
         if (roomDetectionTimerRef.current) {
           clearTimeout(roomDetectionTimerRef.current);
           roomDetectionTimerRef.current = null;
+        }
+        if (yoloTimerRef.current) {
+          clearInterval(yoloTimerRef.current);
+          yoloTimerRef.current = null;
         }
       }
       return !p;
