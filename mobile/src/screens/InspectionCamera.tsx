@@ -374,6 +374,7 @@ export default function InspectionCameraScreen() {
     }
   }, []);
   const autoDetectReloadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const processingTimeoutIdRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const voiceNotesAvailable = getVoiceNotesCapability().supported;
 
   const closeNoteModal = useCallback(() => {
@@ -1148,7 +1149,8 @@ export default function InspectionCameraScreen() {
     });
 
     let activeProcessingCount = 0;
-    let processingTimeoutId: ReturnType<typeof setTimeout> | null = null;
+    // processingTimeoutId is tracked via processingTimeoutIdRef (not a local let)
+    // so the unmount cleanup captures the current value, not a stale null.
     comparison.onStatusChange((status, event) => {
       if (!isMountedRef.current) return;
 
@@ -1161,12 +1163,12 @@ export default function InspectionCameraScreen() {
       setIsProcessing(activeProcessingCount > 0);
 
       // Safety timeout: only fires when ALL comparisons appear stuck
-      if (processingTimeoutId) {
-        clearTimeout(processingTimeoutId);
-        processingTimeoutId = null;
+      if (processingTimeoutIdRef.current) {
+        clearTimeout(processingTimeoutIdRef.current);
+        processingTimeoutIdRef.current = null;
       }
       if (activeProcessingCount > 0) {
-        processingTimeoutId = setTimeout(() => {
+        processingTimeoutIdRef.current = setTimeout(() => {
           if (isMountedRef.current && activeProcessingCount > 0) {
             activeProcessingCount = 0;
             setIsProcessing(false);
@@ -1271,8 +1273,8 @@ export default function InspectionCameraScreen() {
         clearTimeout(yoloLoadTimerRef.current);
         yoloLoadTimerRef.current = null;
       }
-      if (processingTimeoutId) {
-        clearTimeout(processingTimeoutId);
+      if (processingTimeoutIdRef.current) {
+        clearTimeout(processingTimeoutIdRef.current);
       }
       announcerRef.current.setEnabled(false);
       pendingBatchFramesRef.current.clear();
@@ -2368,7 +2370,7 @@ export default function InspectionCameraScreen() {
           authToken: authSession.access_token,
           clientSimilarity: rerankedTopK[0]?.similarity ?? bestSimilarity,
           topCandidateIds: rerankedTopK.slice(0, 3).map(c => c.baselineId),
-          userSelectedCandidateId: userSelectedBaselineId || undefined,
+          userSelectedCandidateId: userSelectedBaselineIdRef.current || undefined,
           skipBurst: !(motionFilterRef.current?.isStable() ?? true),
           refreshToken: async () => {
             const { data } = await supabase.auth.refreshSession();
@@ -2982,7 +2984,7 @@ export default function InspectionCameraScreen() {
         authToken: authSession.access_token,
         clientSimilarity: rerankedTopK[0]?.similarity ?? locked?.similarity,
         topCandidateIds: rerankedTopK.slice(0, 3).map(c => c.baselineId),
-        userSelectedCandidateId: userSelectedBaselineId || undefined,
+        userSelectedCandidateId: userSelectedBaselineIdRef.current || undefined,
         refreshToken: async () => {
           const { data } = await supabase.auth.refreshSession();
           return data.session?.access_token ?? null;
