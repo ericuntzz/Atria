@@ -93,18 +93,28 @@ const TRAINING_MESSAGES = [
   "Building inspection baselines…",
   "Almost there…",
 ];
+// Dense timestamp sampling to capture diverse angles and avoid motion blur.
+// More candidates = better chance of sharp frames. Max kept is still capped.
 const VIDEO_KEYFRAME_TIMESTAMPS_MS = [
-  0,
-  1200,
-  3000,
+  500,    // slightly after start (avoids initial jitter)
+  1500,
+  2500,
+  4000,
   6000,
+  8000,
   10_000,
+  13_000,
   16_000,
+  20_000,
   24_000,
+  30_000,
   36_000,
+  42_000,
   48_000,
+  55_000,
 ];
-const VIDEO_KEYFRAME_MAX_PER_VIDEO = 5;
+// Increased from 5 to 8 — more diverse angles for better walkthrough matching
+const VIDEO_KEYFRAME_MAX_PER_VIDEO = 8;
 
 type VideoThumbnailsModule = {
   getThumbnailAsync: (
@@ -563,7 +573,7 @@ export default function PropertyTrainingScreen() {
       try {
         const thumb = await videoThumbnails.getThumbnailAsync(videoUri, {
           time,
-          quality: 0.65,
+          quality: 0.85,
         });
         if (thumb?.uri) {
           return thumb.uri;
@@ -678,7 +688,7 @@ export default function PropertyTrainingScreen() {
       try {
         const thumb = await videoThumbnails.getThumbnailAsync(videoUri, {
           time,
-          quality: 0.65,
+          quality: 0.85,
         });
         if (!thumb?.uri || seen.has(thumb.uri)) continue;
         seen.add(thumb.uri);

@@ -639,8 +639,21 @@ export default function InspectionCameraScreen() {
         updateCoverageUI(session, resolvedRoomId);
       }
 
-      showCaptureHint("✓ Captured (analyzing...)");
-      void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      // Context-aware hint: don't show generic "Captured" when the final target wasn't credited
+      const curRoom = session.getState().currentRoomId;
+      const roomCov = curRoom ? roomDetectorRef.current?.getRoomCoverage(curRoom) : null;
+      const remainingAngles = roomCov ? roomCov.total - roomCov.scanned : null;
+      if (remainingAngles === 0) {
+        showCaptureHint("✓ Room coverage complete!");
+        void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
+      } else if (remainingAngles === 1) {
+        // Still 1 left — the final target wasn't the one just verified
+        showCaptureHint("Saved for analysis — still need final view");
+        void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      } else {
+        showCaptureHint("✓ Captured (analyzing...)");
+        void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      }
     });
 
     // Register finding callback
