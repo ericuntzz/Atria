@@ -308,6 +308,8 @@ export default function InspectionCameraScreen() {
   const globalKnownConditionsRef = useRef<string[]>([]);
   const announcerRef = useRef(new InspectionAnnouncer());
   const batchAnalyzerRef = useRef<BatchAnalyzer | null>(null);
+  /** Last captured frame data URI — stored so batch analyzer can use the SAME frame that earned coverage */
+  const lastCapturedFrameRef = useRef<{ dataUri: string; baselineId: string; baselineUrl: string; roomId: string; roomName: string; label?: string } | null>(null);
   const pausedRef = useRef(paused);
   const isMountedRef = useRef(true);
   const isProcessingRef = useRef(isProcessing);
@@ -554,12 +556,13 @@ export default function InspectionCameraScreen() {
     });
     batchAnalyzer.setResultCallback((result) => {
       if (!isMountedRef.current) return;
-      // Surface batch findings alongside individual comparison findings
+      // Surface batch findings — use the batch result's roomId, NOT the current room.
+      // The user may have moved to a different room by the time the batch result arrives.
       if (result.findings && result.findings.length > 0) {
-        const currentRoomId = sessionRef.current?.getState().currentRoomId;
+        const batchRoomId = result.roomId;
         for (const f of result.findings) {
-          if (currentRoomId) {
-            sessionRef.current?.addFinding(currentRoomId, {
+          if (batchRoomId) {
+            sessionRef.current?.addFinding(batchRoomId, {
               description: f.description,
               severity: f.severity || "maintenance",
               confidence: f.confidence || 0.7,
@@ -684,21 +687,22 @@ export default function InspectionCameraScreen() {
       }
 
       // Feed frame to batch analyzer for holistic scene analysis.
-      // Capture a quick frame now — the batch analyzer will send it with others for context.
-      if (batchAnalyzerRef.current && resolvedBaselineId && resolvedBaseline) {
-        captureHighResFrame().then((frame) => {
-          if (frame && batchAnalyzerRef.current) {
-            batchAnalyzerRef.current.addFrame({
-              roomId: resolvedRoomId,
-              roomName: resolvedBaseline.roomName || "",
-              dataUri: frame.dataUri,
-              baselineUrl: resolvedBaseline.imageUrl,
-              baselineId: resolvedBaselineId,
-              label: resolvedBaseline.label || undefined,
-              capturedAt: Date.now(),
-            });
-          }
-        }).catch(() => { /* non-critical — batch is additive */ });
+      // Use the STORED frame from the comparison that earned this verified event,
+      // NOT a fresh capture — avoids extra camera work and ensures the batch
+      // analyzes the exact frame that earned coverage credit.
+      if (batchAnalyzerRef.current && resolvedBaselineId) {
+        const storedFrame = lastCapturedFrameRef.current;
+        if (storedFrame && storedFrame.baselineId === resolvedBaselineId) {
+          batchAnalyzerRef.current.addFrame({
+            roomId: storedFrame.roomId,
+            roomName: storedFrame.roomName,
+            dataUri: storedFrame.dataUri,
+            baselineUrl: storedFrame.baselineUrl,
+            baselineId: storedFrame.baselineId,
+            label: storedFrame.label,
+            capturedAt: Date.now(),
+          });
+        }
       }
 
       // Context-aware hint: don't show generic "Captured" when the final target wasn't credited
@@ -2096,6 +2100,15 @@ export default function InspectionCameraScreen() {
       if (!isMountedRef.current || pausedRef.current) return;
       setLocalizationState("capturing");
       hasFirstAutoCaptureRef.current = true;
+      // Store the frame data so the batch analyzer can use the SAME frame that earned coverage
+      lastCapturedFrameRef.current = {
+        dataUri: firstCapture.dataUri,
+        baselineId: selectedBaseline.id,
+        baselineUrl: selectedBaseline.imageUrl,
+        roomId: selectedRoomId,
+        roomName: selectedRoomName,
+        label: selectedBaseline.label || undefined,
+      };
       void comparison.triggerComparison(
         captureFrame,
         selectedBaseline.imageUrl,
@@ -2238,6 +2251,9 @@ export default function InspectionCameraScreen() {
     // Stop new detection/capture work, but allow in-flight comparisons to finish.
     comparison?.pause();
     session.pause();
+    // Flush any remaining batch frames before ending, then pause
+    batchAnalyzerRef.current?.flushAllRooms();
+    batchAnalyzerRef.current?.pause();
     motionFilterRef.current?.stop();
     if (autoCaptureTimerRef.current) {
       clearInterval(autoCaptureTimerRef.current);
