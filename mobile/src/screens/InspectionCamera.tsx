@@ -1298,6 +1298,7 @@ export default function InspectionCameraScreen() {
       if (nextAppState === "background" || nextAppState === "inactive") {
         appStateRef.wasBackground = true;
         motionFilterRef.current?.stop();
+        batchAnalyzerRef.current?.pause();
         if (voiceRecorderRef.current?.isRecording) {
           setIsRecordingVoice(false);
           void voiceRecorderRef.current?.cancelRecording();
@@ -1329,6 +1330,7 @@ export default function InspectionCameraScreen() {
 
             if (!pausedRef.current) {
               motionFilterRef.current?.start();
+              batchAnalyzerRef.current?.resume();
 
               // Restart auto-capture interval if it was running before backgrounding
               if (autoCaptureEnabledRef.current && !autoCaptureTimerRef.current) {
@@ -2519,6 +2521,11 @@ export default function InspectionCameraScreen() {
     if (roomDetectionTimerRef.current) {
       clearTimeout(roomDetectionTimerRef.current);
       roomDetectionTimerRef.current = null;
+    }
+    // Stop YOLO detection loop
+    if (yoloTimerRef.current) {
+      clearInterval(yoloTimerRef.current);
+      yoloTimerRef.current = null;
     }
 
     // Telemetry: log stubborn uncaptured baselines for future optimization

@@ -13,7 +13,7 @@ export const colors = {
   stone: '#D4C8B8',            // Warm Stone (borders, dividers)
 
   // ── Interactive ─────────────────────────
-  primary: '#4DA6FF',          // Sky Blue (buttons, links, active)
+  primary: '#2372B8',          // Sky Blue — darkened for WCAG AA (5.04:1 on white)
   primaryForeground: '#FFFFFF',
   gradientViolet: '#8B8CFF',   // Soft Violet (gradient endpoint only)
 
@@ -29,10 +29,10 @@ export const colors = {
   sidebarActive: '#FFFFFF',
 
   // ── Semantic / Status ───────────────────
-  success: '#4ADE80',
+  success: '#16A34A',           // Green — darkened for WCAG AA (4.5:1 on white)
   warning: '#FBBF24',
   error: '#F87171',
-  info: '#4DA6FF',
+  info: '#2372B8',
 
   // ── Severity / Category ───────────────
   purple: '#A855F7',           // Guest damage, special category

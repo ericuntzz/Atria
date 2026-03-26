@@ -75,6 +75,7 @@ export default function LoginScreen() {
               keyboardType="email-address"
               autoComplete="email"
               returnKeyType="next"
+              accessibilityLabel="Email address"
             />
           </View>
 
@@ -90,6 +91,7 @@ export default function LoginScreen() {
               autoComplete="password"
               returnKeyType="done"
               onSubmitEditing={handleLogin}
+              accessibilityLabel="Password"
             />
           </View>
 
