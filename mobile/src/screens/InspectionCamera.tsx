@@ -44,6 +44,8 @@ import { loadOnnxModel, type OnnxModelLoader } from "../lib/vision/onnx-model";
 import {
   getInspectionBaselines,
   submitBulkResults,
+  getPropertyFeedback,
+  postFindingFeedback,
 } from "../lib/api";
 import { supabase } from "../lib/supabase";
 import * as FileSystem from "expo-file-system";
@@ -1545,6 +1547,22 @@ export default function InspectionCameraScreen() {
           const firstRoom = mappedRooms[0];
           activateRoom(session, firstRoom.roomId, firstRoom.roomName);
         }
+
+        // Seed finding suppression from server feedback (cross-inspection learning).
+        // Non-blocking — if it fails, the inspection still works with session-local suppression only.
+        getPropertyFeedback(propertyId).then((feedback) => {
+          if (!isMountedRef.current) return;
+          for (const item of feedback) {
+            if (item.action === "dismissed" && item.findingFingerprint) {
+              dismissedFingerprintsRef.current.add(item.findingFingerprint);
+            }
+          }
+          if (feedback.length > 0) {
+            console.log(`[Feedback] Seeded ${dismissedFingerprintsRef.current.size} suppression rules from ${feedback.length} feedback entries`);
+          }
+        }).catch((err) => {
+          console.warn("[Feedback] Failed to load property feedback:", err);
+        });
       } catch (err) {
         console.error("Failed to load baselines:", err);
         Alert.alert(
@@ -2897,11 +2915,35 @@ export default function InspectionCameraScreen() {
   ]);
 
   const handleConfirmFinding = useCallback((findingId: string) => {
-    sessionRef.current?.updateFindingStatus(findingId, "confirmed");
+    const session = sessionRef.current;
+    session?.updateFindingStatus(findingId, "confirmed");
+
+    // Persist confirmation to server for cross-inspection learning (non-blocking)
+    const state = session?.getState();
+    if (state) {
+      for (const visit of state.visitedRooms.values()) {
+        const finding = visit.findings.find((f) => f.id === findingId);
+        if (finding) {
+          postFindingFeedback(propertyId, {
+            inspectionId,
+            roomId: visit.roomId,
+            findingFingerprint: findingFingerprint(finding.category, finding.description),
+            findingDescription: finding.description,
+            findingCategory: finding.category,
+            findingSeverity: finding.severity,
+            action: "confirmed",
+          }).catch((err) => {
+            console.warn("[Feedback] Failed to persist confirm:", err);
+          });
+          break;
+        }
+      }
+    }
+
     setFindings((prev) => prev.filter((f) => f.id !== findingId));
     showCaptureHint("Finding confirmed");
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-  }, [showCaptureHint]);
+  }, [showCaptureHint, propertyId, inspectionId]);
 
   const handleDismissFinding = useCallback((findingId: string, reason?: DismissReason) => {
     const session = sessionRef.current;
@@ -2924,6 +2966,20 @@ export default function InspectionCameraScreen() {
             existing.push(finding.description);
             knownConditionsByRoomRef.current.set(visit.roomId, existing);
           }
+
+          // Persist to server for cross-inspection learning (non-blocking)
+          postFindingFeedback(propertyId, {
+            inspectionId,
+            roomId: visit.roomId,
+            findingFingerprint: findingFingerprint(finding.category, finding.description),
+            findingDescription: finding.description,
+            findingCategory: finding.category,
+            findingSeverity: finding.severity,
+            action: "dismissed",
+            dismissReason: reason ?? undefined,
+          }).catch((err) => {
+            console.warn("[Feedback] Failed to persist dismiss:", err);
+          });
           break;
         }
       }

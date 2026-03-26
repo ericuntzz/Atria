@@ -370,6 +370,41 @@ export interface Finding {
 }
 
 // ============================================================================
+// Finding Feedback — cross-inspection learning
+// ============================================================================
+
+export const findingFeedback = pgTable("finding_feedback", {
+  id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+  propertyId: uuid("property_id")
+    .references(() => properties.id, { onDelete: "cascade" })
+    .notNull(),
+  inspectionId: uuid("inspection_id")
+    .references(() => inspections.id, { onDelete: "set null" }),
+  roomId: uuid("room_id"),
+  baselineImageId: uuid("baseline_image_id"),
+  /** Normalized fingerprint for dedup: category + first 40 chars of normalized description */
+  findingFingerprint: text("finding_fingerprint").notNull(),
+  /** Original finding description for display/debugging */
+  findingDescription: text("finding_description").notNull(),
+  findingCategory: varchar("finding_category"), // missing, moved, damage, etc.
+  findingSeverity: varchar("finding_severity"), // cosmetic, maintenance, safety, etc.
+  /** User action */
+  action: varchar("action").notNull(), // confirmed, dismissed
+  /** Dismiss reason — only set when action=dismissed */
+  dismissReason: varchar("dismiss_reason"), // not_accurate, still_there, known_issue
+  /** How many times this fingerprint has been dismissed on this property */
+  dismissCount: integer("dismiss_count").default(1),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+}, (table) => [
+  index("idx_finding_feedback_property").on(table.propertyId),
+  index("idx_finding_feedback_fingerprint").on(table.propertyId, table.findingFingerprint),
+]);
+
+export type FindingFeedback = typeof findingFeedback.$inferSelect;
+export type InsertFindingFeedback = typeof findingFeedback.$inferInsert;
+
+// ============================================================================
 // Relations
 // ============================================================================
 
@@ -389,6 +424,7 @@ export const propertiesRelations = relations(properties, ({ one, many }) => ({
   baselineVersions: many(baselineVersions),
   conditions: many(propertyConditions),
   guestStays: many(guestStays),
+  findingFeedback: many(findingFeedback),
 }));
 
 export const roomsRelations = relations(rooms, ({ one, many }) => ({

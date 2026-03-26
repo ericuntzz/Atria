@@ -356,6 +356,53 @@ export async function getPropertyConditions(
   return res.json();
 }
 
+// ── Finding Feedback (cross-inspection learning) ──────────────────────
+
+export interface FindingFeedbackItem {
+  id: string;
+  findingFingerprint: string;
+  findingDescription: string;
+  findingCategory: string | null;
+  action: "confirmed" | "dismissed";
+  dismissReason: string | null;
+  dismissCount: number;
+  roomId: string | null;
+  baselineImageId: string | null;
+  createdAt: string;
+}
+
+/** Fetch all finding feedback for a property — seeds suppression at inspection start */
+export async function getPropertyFeedback(
+  propertyId: string,
+): Promise<FindingFeedbackItem[]> {
+  const res = await authFetch(`/api/properties/${propertyId}/feedback`);
+  const data = await res.json();
+  return data.feedback || [];
+}
+
+/** Record a finding confirm/dismiss for cross-inspection learning */
+export async function postFindingFeedback(
+  propertyId: string,
+  feedback: {
+    inspectionId?: string;
+    roomId?: string;
+    baselineImageId?: string;
+    findingFingerprint: string;
+    findingDescription: string;
+    findingCategory?: string;
+    findingSeverity?: string;
+    action: "confirmed" | "dismissed";
+    dismissReason?: string;
+  },
+): Promise<{ id: string; dismissCount: number }> {
+  const res = await authFetch(`/api/properties/${propertyId}/feedback`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(feedback),
+  });
+  return res.json();
+}
+
 export async function updateProperty(
   id: string,
   updates: Record<string, unknown>,

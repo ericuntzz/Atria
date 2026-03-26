@@ -9,7 +9,7 @@ import {
 } from "@/lib/vision/compare";
 import { rerankCandidateBaselinesByServerEmbedding } from "@/lib/vision/candidate-rerank";
 import { db } from "@/server/db";
-import { baselineImages, baselineVersions, inspections, rooms } from "@/server/schema";
+import { baselineImages, baselineVersions, inspections, rooms, findingFeedback } from "@/server/schema";
 import { eq, and, inArray } from "drizzle-orm";
 import { emitEventSafe } from "@/lib/events/emit";
 
@@ -183,6 +183,31 @@ export async function POST(request: NextRequest) {
     }
 
     inspectionPropertyId = inspection.propertyId;
+
+    // Merge server-side finding feedback into known conditions.
+    // Findings dismissed 2+ times on this property are treated as known conditions
+    // so Claude Vision doesn't re-alert on them.
+    try {
+      const dismissed = await db
+        .select({
+          description: findingFeedback.findingDescription,
+          dismissCount: findingFeedback.dismissCount,
+        })
+        .from(findingFeedback)
+        .where(
+          and(
+            eq(findingFeedback.propertyId, inspectionPropertyId),
+            eq(findingFeedback.action, "dismissed"),
+          ),
+        );
+      for (const d of dismissed) {
+        if (d.description && (d.dismissCount ?? 0) >= 2 && !validatedConditions.includes(d.description)) {
+          validatedConditions.push(`[Previously dismissed] ${d.description}`);
+        }
+      }
+    } catch (err) {
+      console.warn("[compare-stream] Failed to load finding feedback:", err);
+    }
   }
 
   // Validate inspectionMode if provided
