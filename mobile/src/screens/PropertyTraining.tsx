@@ -93,28 +93,32 @@ const TRAINING_MESSAGES = [
   "Building inspection baselines…",
   "Almost there…",
 ];
-// Dense timestamp sampling to capture diverse angles and avoid motion blur.
-// More candidates = better chance of sharp frames. Max kept is still capped.
-const VIDEO_KEYFRAME_TIMESTAMPS_MS = [
-  500,    // slightly after start (avoids initial jitter)
-  1500,
-  2500,
-  4000,
-  6000,
-  8000,
-  10_000,
-  13_000,
-  16_000,
-  20_000,
-  24_000,
-  30_000,
-  36_000,
-  42_000,
-  48_000,
-  55_000,
+// Base timestamps for short videos (<60s). For longer videos,
+// generateKeyframeTimestamps() extends sampling across the full duration.
+const BASE_KEYFRAME_TIMESTAMPS_MS = [
+  500, 1500, 2500, 4000, 6000, 8000, 10_000, 13_000,
+  16_000, 20_000, 24_000, 30_000, 36_000, 42_000, 48_000, 55_000,
 ];
 // Increased from 5 to 8 — more diverse angles for better walkthrough matching
 const VIDEO_KEYFRAME_MAX_PER_VIDEO = 8;
+// Max candidates to extract before sharpness scoring
+const VIDEO_KEYFRAME_MAX_CANDIDATES = 20;
+
+/** Generate duration-aware timestamps. For videos longer than 60s,
+ *  extends sampling evenly across the full duration so no content is ignored. */
+function generateKeyframeTimestamps(durationMs?: number): number[] {
+  if (!durationMs || durationMs <= 60_000) {
+    return BASE_KEYFRAME_TIMESTAMPS_MS;
+  }
+  // Use base timestamps for first minute, then add evenly-spaced samples for the rest
+  const extended = [...BASE_KEYFRAME_TIMESTAMPS_MS];
+  const remainingMs = durationMs - 60_000;
+  const extraCount = Math.min(8, Math.ceil(remainingMs / 10_000)); // ~1 sample per 10s
+  for (let i = 1; i <= extraCount; i++) {
+    extended.push(60_000 + Math.round((remainingMs * i) / (extraCount + 1)));
+  }
+  return extended;
+}
 
 type VideoThumbnailsModule = {
   getThumbnailAsync: (
@@ -569,7 +573,7 @@ export default function PropertyTrainingScreen() {
       return null;
     }
 
-    for (const time of VIDEO_KEYFRAME_TIMESTAMPS_MS.slice(0, 3)) {
+    for (const time of BASE_KEYFRAME_TIMESTAMPS_MS.slice(0, 3)) {
       try {
         const thumb = await videoThumbnails.getThumbnailAsync(videoUri, {
           time,
@@ -685,7 +689,8 @@ export default function PropertyTrainingScreen() {
     const candidates: Array<{ uri: string; time: number; fileSize: number }> = [];
     const seen = new Set<string>();
 
-    for (const time of VIDEO_KEYFRAME_TIMESTAMPS_MS) {
+    const timestamps = generateKeyframeTimestamps();
+    for (const time of timestamps) {
       try {
         const thumb = await videoThumbnails.getThumbnailAsync(videoUri, {
           time,

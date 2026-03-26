@@ -2159,6 +2159,7 @@ export default function InspectionCameraScreen() {
         // Resuming
         session.resume();
         comparison.resume();
+        batchAnalyzerRef.current?.resume();
         motionFilterRef.current?.start();
 
         // Restart auto-capture interval
@@ -2177,6 +2178,7 @@ export default function InspectionCameraScreen() {
         // Pausing — stop sensors and timers to save battery
         session.pause();
         comparison.pause();
+        batchAnalyzerRef.current?.pause();
         motionFilterRef.current?.stop();
 
         if (autoCaptureTimerRef.current) {
