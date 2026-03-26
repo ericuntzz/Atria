@@ -65,7 +65,21 @@ export async function POST(request: NextRequest) {
         { status: 400 },
       );
     }
-    const batchFrames = frames;
+    // Validate currentImage fields are actual data URIs, not URLs (prevents misuse)
+    const batchFrames = frames.filter((f: { currentImage?: string }) => {
+      if (!f.currentImage || !f.currentImage.startsWith("data:image/")) {
+        console.warn("[batch-analyze] Rejected frame with non-data-URI currentImage");
+        return false;
+      }
+      return true;
+    });
+
+    if (batchFrames.length === 0) {
+      return NextResponse.json(
+        { error: "No valid frames with data URI images" },
+        { status: 400 },
+      );
+    }
 
     const anthropicKey = process.env.CLAUDE_API_KEY;
     if (!anthropicKey) {

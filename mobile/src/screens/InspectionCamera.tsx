@@ -1111,6 +1111,9 @@ export default function InspectionCameraScreen() {
       if (captureHintTimerRef.current) {
         clearTimeout(captureHintTimerRef.current);
       }
+      if (detailHintTimerRef.current) {
+        clearTimeout(detailHintTimerRef.current);
+      }
       if (targetAssistTimerRef.current) {
         clearTimeout(targetAssistTimerRef.current);
       }
