@@ -19,6 +19,7 @@ interface PendingBulkSubmission {
   completionTier?: string;
   notes?: string;
   events?: unknown[];
+  effectiveCoverage?: unknown;
   createdAt: number;
 }
 
@@ -76,6 +77,7 @@ export function enqueueBulkSubmission(params: {
   completionTier?: string;
   notes?: string;
   events?: unknown[];
+  effectiveCoverage?: unknown;
 }): Promise<void> {
   return withQueueLock(async () => {
     const queue = await readQueue();
@@ -142,6 +144,7 @@ export function flushBulkSubmissionQueue(): Promise<QueueFlushResult> {
           item.completionTier,
           item.notes,
           item.events,
+          item.effectiveCoverage as Parameters<typeof submitBulkResults>[5],
         );
         flushed++;
       } catch (err) {

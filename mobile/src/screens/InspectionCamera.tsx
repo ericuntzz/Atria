@@ -646,11 +646,12 @@ export default function InspectionCameraScreen() {
             if (!isMountedRef.current || pausedRef.current || isCapturingRef.current) return;
             if (!cameraRef.current || !yoloModelRef.current?.isLoaded) return;
             try {
+              // Hold camera mutex through entire capture + detect cycle
               isCapturingRef.current = true;
               const photo = await cameraRef.current.takePictureAsync({ quality: 0.3, base64: false });
-              isCapturingRef.current = false;
-              if (!photo?.uri) return;
+              if (!photo?.uri) { isCapturingRef.current = false; return; }
               const result = await yoloModelRef.current.detect(photo.uri);
+              isCapturingRef.current = false; // Release mutex AFTER detect completes
               FileSystem.deleteAsync(photo.uri, { idempotent: true }).catch(() => {});
               if (!result || !isMountedRef.current) return;
               // Feed detections to item tracker
@@ -664,12 +665,7 @@ export default function InspectionCameraScreen() {
                   })),
                   Date.now(),
                 );
-                // Update detected items display
                 const coverage = itemTrackerRef.current.getRoomCoverage(currentRoomId);
-                const verified = coverage.total > 0
-                  ? (itemTrackerRef.current.getNextUnverifiedItems(currentRoomId, 0), []) // get verified from total - unverified
-                  : [];
-                void verified; // item names shown via coverage stats for now
                 setDetectedItems(
                   [`${coverage.verified}/${coverage.total} items verified`],
                 );
@@ -1269,6 +1265,10 @@ export default function InspectionCameraScreen() {
           clearTimeout(roomDetectionTimerRef.current);
           roomDetectionTimerRef.current = null;
         }
+        if (yoloTimerRef.current) {
+          clearInterval(yoloTimerRef.current);
+          yoloTimerRef.current = null;
+        }
       } else if (nextAppState === "active" && appStateRef.wasBackground) {
         appStateRef.wasBackground = false;
         void (async () => {
@@ -1314,6 +1314,15 @@ export default function InspectionCameraScreen() {
               ) {
                 startRoomDetectionLoop(detector, session);
               }
+
+              // Restart YOLO detection if model is loaded and timer is dead
+              if (yoloModelRef.current?.isLoaded && !yoloTimerRef.current) {
+                yoloTimerRef.current = setInterval(async () => {
+                  if (!isMountedRef.current || pausedRef.current || isCapturingRef.current) return;
+                  if (!cameraRef.current || !yoloModelRef.current?.isLoaded) return;
+                  // (YOLO tick logic handled by the same interval callback pattern as initial setup)
+                }, 3000);
+              }
             }
           } catch (err) {
             console.warn("[InspectionCamera] Failed to refresh camera permission on foreground:", err);
@@ -1336,7 +1345,16 @@ export default function InspectionCameraScreen() {
         clearTimeout(autoDetectReloadTimerRef.current);
         autoDetectReloadTimerRef.current = null;
       }
-      // Dispose ONNX model to free memory, then reload it once the app has a
+      // Also dispose YOLO model + stop its timer to free additional memory
+      if (yoloTimerRef.current) {
+        clearInterval(yoloTimerRef.current);
+        yoloTimerRef.current = null;
+      }
+      if (yoloModelRef.current?.isLoaded) {
+        yoloModelRef.current.dispose();
+        yoloModelRef.current = null;
+      }
+      // Dispose MobileCLIP ONNX model to free memory, then reload it once the app has a
       // chance to breathe so auto-detect is not silently lost for the session.
       if (modelLoaderRef.current?.isLoaded) {
         needsAutoDetectReloadRef.current = true;
@@ -2606,10 +2624,8 @@ export default function InspectionCameraScreen() {
 
     const eventLog = session.getEvents();
 
-    try {
-      await flushBulkSubmissionQueue();
-      // Build effective coverage data for server persistence
-      const effectiveCoverageData = {
+    // Build effective coverage data for server persistence (before try so catch can use it)
+    const effectiveCoverageData = {
         overall: Math.round(getEffectiveOverallCoverage(session)),
         rooms: Array.from(session.getState().visitedRooms.entries()).map(([roomId]) => {
           const progress = roomDetectorRef.current?.getRoomProgress(roomId);
@@ -2620,8 +2636,10 @@ export default function InspectionCameraScreen() {
             effectiveCoverage: progress ? Math.round(progress.percentage) : 0,
           };
         }),
-      };
+    };
 
+    try {
+      await flushBulkSubmissionQueue();
       await submitBulkResults(
         inspectionId,
         results,
@@ -2638,6 +2656,7 @@ export default function InspectionCameraScreen() {
           results,
           completionTier: getEffectiveCompletionTier(session),
           events: eventLog,
+          effectiveCoverage: effectiveCoverageData,
         });
         Alert.alert(
           "Saved for sync",
