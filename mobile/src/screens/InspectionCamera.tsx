@@ -55,6 +55,7 @@ import {
 import { getInspectionDisplayLabel } from "../lib/inspection/display-labels";
 import type { ImageSourceType } from "../lib/image-source/types";
 import { InspectionAnnouncer } from "../lib/audio/inspection-announcer";
+import { BatchAnalyzer, type BatchFrame } from "../lib/vision/batch-analyzer";
 
 type Nav = NativeStackNavigationProp<RootStackParamList, "InspectionCamera">;
 type CameraRoute = RouteProp<RootStackParamList, "InspectionCamera">;
@@ -306,6 +307,7 @@ export default function InspectionCameraScreen() {
   const knownConditionsByRoomRef = useRef<Map<string, string[]>>(new Map());
   const globalKnownConditionsRef = useRef<string[]>([]);
   const announcerRef = useRef(new InspectionAnnouncer());
+  const batchAnalyzerRef = useRef<BatchAnalyzer | null>(null);
   const pausedRef = useRef(paused);
   const isMountedRef = useRef(true);
   const isProcessingRef = useRef(isProcessing);
@@ -538,6 +540,48 @@ export default function InspectionCameraScreen() {
     comparisonRef.current = comparison;
     announcerRef.current.setEnabled(activeImageSource !== "camera");
 
+    // Initialize batch analyzer for holistic scene analysis
+    const batchAnalyzer = new BatchAnalyzer({
+      batchSize: 5,
+      maxBatchWaitMs: 15000,
+      maxConcurrentBatches: 2,
+      apiUrl: process.env.EXPO_PUBLIC_API_URL || "",
+      getAuthToken: async () => {
+        const { data } = await supabase.auth.getSession();
+        return data.session?.access_token || null;
+      },
+      inspectionMode,
+    });
+    batchAnalyzer.setResultCallback((result) => {
+      if (!isMountedRef.current) return;
+      // Surface batch findings alongside individual comparison findings
+      if (result.findings && result.findings.length > 0) {
+        const currentRoomId = sessionRef.current?.getState().currentRoomId;
+        for (const f of result.findings) {
+          if (currentRoomId) {
+            sessionRef.current?.addFinding(currentRoomId, {
+              description: f.description,
+              severity: f.severity || "maintenance",
+              confidence: f.confidence || 0.7,
+              category: f.category || "condition",
+              findingCategory: f.findingCategory || "condition",
+              isClaimable: f.isClaimable || false,
+            });
+          }
+        }
+        const count = result.findings.length;
+        const firstDesc = result.findings[0].description;
+        const truncated = firstDesc.length > 50 ? firstDesc.slice(0, 47) + "..." : firstDesc;
+        showCaptureHint(
+          count === 1
+            ? `🔍 Scene analysis: ${truncated}`
+            : `🔍 Scene analysis: ${count} issues found`,
+        );
+        void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
+      }
+    });
+    batchAnalyzerRef.current = batchAnalyzer;
+
     // Initialize room detector
     const roomDetector = new RoomDetector();
     roomDetectorRef.current = roomDetector;
@@ -637,6 +681,24 @@ export default function InspectionCameraScreen() {
           }
         }
         updateCoverageUI(session, resolvedRoomId);
+      }
+
+      // Feed frame to batch analyzer for holistic scene analysis.
+      // Capture a quick frame now — the batch analyzer will send it with others for context.
+      if (batchAnalyzerRef.current && resolvedBaselineId && resolvedBaseline) {
+        captureHighResFrame().then((frame) => {
+          if (frame && batchAnalyzerRef.current) {
+            batchAnalyzerRef.current.addFrame({
+              roomId: resolvedRoomId,
+              roomName: resolvedBaseline.roomName || "",
+              dataUri: frame.dataUri,
+              baselineUrl: resolvedBaseline.imageUrl,
+              baselineId: resolvedBaselineId,
+              label: resolvedBaseline.label || undefined,
+              capturedAt: Date.now(),
+            });
+          }
+        }).catch(() => { /* non-critical — batch is additive */ });
       }
 
       // Context-aware hint: don't show generic "Captured" when the final target wasn't credited
@@ -1059,6 +1121,8 @@ export default function InspectionCameraScreen() {
         clearTimeout(processingTimeoutId);
       }
       announcerRef.current.setEnabled(false);
+      batchAnalyzerRef.current?.dispose();
+      batchAnalyzerRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -1266,6 +1330,11 @@ export default function InspectionCameraScreen() {
 
   const activateRoom = useCallback(
     (session: SessionManager, roomId: string, roomName: string) => {
+      // Flush batch analyzer for the previous room before switching
+      const prevRoomId = session.getState().currentRoomId;
+      if (prevRoomId && prevRoomId !== roomId && batchAnalyzerRef.current) {
+        batchAnalyzerRef.current.onRoomTransition(prevRoomId);
+      }
       changeDetectorRef.current?.reset();
       comparisonRef.current?.resetBackoff();
       session.enterRoom(roomId, roomName);

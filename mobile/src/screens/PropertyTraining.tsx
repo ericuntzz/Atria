@@ -681,7 +681,8 @@ export default function PropertyTrainingScreen() {
       return [];
     }
 
-    const frames: string[] = [];
+    // Phase 1: Extract ALL candidate frames at each timestamp
+    const candidates: Array<{ uri: string; time: number; fileSize: number }> = [];
     const seen = new Set<string>();
 
     for (const time of VIDEO_KEYFRAME_TIMESTAMPS_MS) {
@@ -692,14 +693,61 @@ export default function PropertyTrainingScreen() {
         });
         if (!thumb?.uri || seen.has(thumb.uri)) continue;
         seen.add(thumb.uri);
-        frames.push(thumb.uri);
-        if (frames.length >= VIDEO_KEYFRAME_MAX_PER_VIDEO) break;
+
+        // Use file size as sharpness proxy: sharper images have more
+        // high-frequency detail and compress to larger files at same quality.
+        let fileSize = 0;
+        try {
+          const info = await FileSystem.getInfoAsync(thumb.uri);
+          fileSize = (info.exists && "size" in info) ? (info.size ?? 0) : 0;
+        } catch { /* fallback to 0 */ }
+
+        candidates.push({ uri: thumb.uri, time, fileSize });
       } catch {
         // Ignore out-of-range timestamps and continue trying others.
       }
     }
 
-    return frames;
+    if (candidates.length <= VIDEO_KEYFRAME_MAX_PER_VIDEO) {
+      return candidates.map(c => c.uri);
+    }
+
+    // Phase 2: Score and select the best diverse set.
+    // Sort by sharpness (file size) descending, then pick with temporal spread.
+    candidates.sort((a, b) => b.fileSize - a.fileSize);
+
+    // Greedy selection: pick sharpest frames that are at least 1.5s apart
+    const MIN_TIME_GAP_MS = 1500;
+    const selected: typeof candidates = [];
+    for (const candidate of candidates) {
+      if (selected.length >= VIDEO_KEYFRAME_MAX_PER_VIDEO) break;
+      const tooClose = selected.some(s => Math.abs(s.time - candidate.time) < MIN_TIME_GAP_MS);
+      if (!tooClose) {
+        selected.push(candidate);
+      }
+    }
+
+    // If we didn't fill up (all frames too close together), fill from remaining
+    if (selected.length < VIDEO_KEYFRAME_MAX_PER_VIDEO) {
+      for (const candidate of candidates) {
+        if (selected.length >= VIDEO_KEYFRAME_MAX_PER_VIDEO) break;
+        if (!selected.includes(candidate)) {
+          selected.push(candidate);
+        }
+      }
+    }
+
+    // Clean up unselected frames
+    const selectedUris = new Set(selected.map(s => s.uri));
+    for (const candidate of candidates) {
+      if (!selectedUris.has(candidate.uri)) {
+        FileSystem.deleteAsync(candidate.uri, { idempotent: true }).catch(() => {});
+      }
+    }
+
+    // Return in temporal order for consistent baseline ordering
+    selected.sort((a, b) => a.time - b.time);
+    return selected.map(c => c.uri);
   }, []);
 
   const hasUsableVideoTrainingFrames = useCallback(async () => {
