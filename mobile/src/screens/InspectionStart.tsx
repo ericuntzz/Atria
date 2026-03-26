@@ -97,6 +97,8 @@ export default function InspectionStartScreen() {
         style={styles.backButton}
         onPress={() => navigation.goBack()}
         activeOpacity={0.7}
+        accessibilityRole="button"
+        accessibilityLabel="Go back to property"
       >
         <Text style={styles.backButtonText}>{"<"} Back</Text>
       </TouchableOpacity>
@@ -225,8 +227,9 @@ const styles = StyleSheet.create({
   backButton: {
     marginBottom: 20,
     alignSelf: "flex-start",
-    paddingVertical: 4,
-    paddingRight: 8,
+    paddingVertical: 10,
+    paddingRight: 16,
+    minHeight: 44,
   },
   backButtonText: {
     color: colors.muted,

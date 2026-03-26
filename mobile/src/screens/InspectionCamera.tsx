@@ -3946,8 +3946,9 @@ const styles = StyleSheet.create({
   endButton: {
     backgroundColor: "rgba(0,0,0,0.65)",
     borderRadius: 12,
-    paddingHorizontal: 14,
-    paddingVertical: 10,
+    paddingHorizontal: 16,
+    paddingVertical: 14,
+    minHeight: 44,
     borderWidth: 1,
     borderColor: "rgba(255,255,255,0.08)",
     flexShrink: 0,
