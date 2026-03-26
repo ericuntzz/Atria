@@ -9,7 +9,7 @@
  * Server-side transcription via Whisper or Claude.
  */
 
-import { Audio } from "expo-av";
+import { requireOptionalNativeModule } from "expo-modules-core";
 
 export interface VoiceNoteResult {
   /** Transcribed text from the recording */
@@ -34,6 +34,25 @@ export interface VoiceNoteRecorder {
 }
 
 const MAX_RECORDING_DURATION_MS = 30000; // 30 seconds max
+const hasExpoAvNativeModule = Boolean(requireOptionalNativeModule("ExponentAV"));
+type ExpoAudioModule = typeof import("expo-av").Audio;
+type RecordingHandle = {
+  stopAndUnloadAsync: () => Promise<unknown>;
+  getURI: () => string | null;
+};
+
+async function loadAudioModule(): Promise<ExpoAudioModule | null> {
+  if (!hasExpoAvNativeModule) {
+    return null;
+  }
+  try {
+    const { Audio } = await import("expo-av");
+    return Audio;
+  } catch (err) {
+    console.warn("[VoiceNotes] expo-av unavailable:", err);
+    return null;
+  }
+}
 
 /**
  * Create a voice note recorder.
@@ -43,7 +62,8 @@ export function createVoiceNoteRecorder(
   apiUrl: string,
   getAuthToken: () => Promise<string | null>,
 ): VoiceNoteRecorder {
-  let recording: Audio.Recording | null = null;
+  let recording: RecordingHandle | null = null;
+  let audioModule: ExpoAudioModule | null = null;
   let recordingStartTime = 0;
   let autoStopTimer: ReturnType<typeof setTimeout> | null = null;
   let disposed = false;
@@ -52,22 +72,28 @@ export function createVoiceNoteRecorder(
     if (disposed || recording) return false;
 
     try {
+      audioModule = await loadAudioModule();
+      if (!audioModule) {
+        console.warn("[VoiceNotes] Recording unavailable: expo-av native module missing");
+        return false;
+      }
+
       // Request permissions
-      const { granted } = await Audio.requestPermissionsAsync();
+      const { granted } = await audioModule.requestPermissionsAsync();
       if (!granted) {
         console.warn("[VoiceNotes] Microphone permission denied");
         return false;
       }
 
       // Configure audio session for recording
-      await Audio.setAudioModeAsync({
+      await audioModule.setAudioModeAsync({
         allowsRecordingIOS: true,
         playsInSilentModeIOS: true,
       });
 
       // Start recording
-      const { recording: newRecording } = await Audio.Recording.createAsync(
-        Audio.RecordingOptionsPresets.HIGH_QUALITY,
+      const { recording: newRecording } = await audioModule.Recording.createAsync(
+        audioModule.RecordingOptionsPresets.HIGH_QUALITY,
       );
 
       recording = newRecording;
@@ -108,9 +134,11 @@ export function createVoiceNoteRecorder(
       if (!uri) return null;
 
       // Reset audio mode
-      await Audio.setAudioModeAsync({
-        allowsRecordingIOS: false,
-      });
+      if (audioModule) {
+        await audioModule.setAudioModeAsync({
+          allowsRecordingIOS: false,
+        });
+      }
 
       // Transcribe via server
       const transcript = await transcribeAudio(uri, apiUrl, getAuthToken);
@@ -145,9 +173,11 @@ export function createVoiceNoteRecorder(
     recording = null;
 
     try {
-      await Audio.setAudioModeAsync({
-        allowsRecordingIOS: false,
-      });
+      if (audioModule) {
+        await audioModule.setAudioModeAsync({
+          allowsRecordingIOS: false,
+        });
+      }
     } catch {
       // Ignore — audio session may be in a bad state, don't let it propagate
     }

@@ -136,6 +136,7 @@ type NativeVideoThumbnailsModule = {
 
 let cachedVideoThumbnailsModule: VideoThumbnailsModule | null | undefined;
 let loggedMissingVideoThumbnailsModule = false;
+const hasExpoAvNativeModule = Boolean(requireOptionalNativeModule("ExponentAV"));
 
 function getVideoThumbnailsModule(): VideoThumbnailsModule | null {
   if (cachedVideoThumbnailsModule !== undefined) {
@@ -687,15 +688,19 @@ export default function PropertyTrainingScreen() {
 
     // Get video duration for dynamic timestamp generation
     let videoDurationMs: number | undefined;
-    try {
-      const { Audio } = await import("expo-av");
-      const { sound } = await Audio.Sound.createAsync({ uri: videoUri });
-      const status = await sound.getStatusAsync();
-      if (status.isLoaded && status.durationMillis) {
-        videoDurationMs = status.durationMillis;
+    if (hasExpoAvNativeModule) {
+      try {
+        const { Audio } = await import("expo-av");
+        const { sound } = await Audio.Sound.createAsync({ uri: videoUri });
+        const status = await sound.getStatusAsync();
+        if (status.isLoaded && status.durationMillis) {
+          videoDurationMs = status.durationMillis;
+        }
+        await sound.unloadAsync();
+      } catch {
+        // Duration unavailable — use base timestamps.
       }
-      await sound.unloadAsync();
-    } catch { /* duration unavailable — use base timestamps */ }
+    }
 
     // Phase 1: Extract ALL candidate frames at each timestamp
     const candidates: Array<{ uri: string; time: number; sharpness: number }> = [];
