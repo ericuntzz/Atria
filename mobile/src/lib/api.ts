@@ -479,10 +479,19 @@ export async function submitBulkResults(
   completionTier?: string,
   notes?: string,
   events?: unknown[],
+  effectiveCoverage?: {
+    overall: number;
+    rooms: Array<{
+      roomId: string;
+      effectiveAnglesScanned: number;
+      effectiveAnglesTotal: number;
+      effectiveCoverage: number;
+    }>;
+  },
 ) {
   const res = await authFetch(`/api/inspections/${inspectionId}/bulk`, {
     method: "POST",
-    json: { results, completionTier, notes, events },
+    json: { results, completionTier, notes, events, effectiveCoverage },
   });
   return res.json();
 }

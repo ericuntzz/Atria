@@ -119,6 +119,16 @@ function mapInspectionToSummary(payload: {
   readinessScore?: number | null;
   startedAt?: string | null;
   completedAt?: string | null;
+  /** Persisted effective coverage from the detector model at completion time */
+  effectiveCoverage?: {
+    overall?: number;
+    rooms?: Array<{
+      roomId: string;
+      effectiveAnglesScanned: number;
+      effectiveAnglesTotal: number;
+      effectiveCoverage: number;
+    }>;
+  } | null;
   rooms?: Array<{
     id: string;
     name: string;
@@ -206,19 +216,21 @@ function mapInspectionToSummary(payload: {
       scores: [],
       findings: [],
     };
-    // NOTE: On reload, this uses raw baseline count (not cluster-effective count).
-    // Live inspection uses detector.getRoomProgress() which accounts for clustering.
-    // This may show slightly different coverage than the live UI showed.
-    // Full fix: persist effectiveAngles in bulk submission payload.
-    const anglesTotal = room.baselineImages?.length || 0;
-    const anglesScanned = Math.min(anglesTotal, bucket.baselineIds.size);
+    // Use persisted effective coverage when available (matches live inspection numbers).
+    // Falls back to raw baseline count for inspections completed before this feature.
+    const effectiveRoom = payload.effectiveCoverage?.rooms?.find(r => r.roomId === room.id);
+    const anglesTotal = effectiveRoom?.effectiveAnglesTotal ?? (room.baselineImages?.length || 0);
+    const anglesScanned = effectiveRoom
+      ? effectiveRoom.effectiveAnglesScanned
+      : Math.min(anglesTotal, bucket.baselineIds.size);
     const score =
       bucket.scores.length > 0
         ? bucket.scores.reduce((sum, value) => sum + value, 0) /
           bucket.scores.length
         : null;
-    const coverage =
-      anglesTotal > 0 ? Math.round((anglesScanned / anglesTotal) * 100) : 0;
+    const coverage = effectiveRoom
+      ? effectiveRoom.effectiveCoverage
+      : anglesTotal > 0 ? Math.round((anglesScanned / anglesTotal) * 100) : 0;
 
     return {
       roomId: room.id,
@@ -241,8 +253,9 @@ function mapInspectionToSummary(payload: {
     (sum, room) => sum + room.anglesScanned,
     0,
   );
-  const overallCoverage =
-    totalAngles > 0 ? Math.round((totalScannedAngles / totalAngles) * 100) : 0;
+  const overallCoverage = payload.effectiveCoverage?.overall != null
+    ? payload.effectiveCoverage.overall
+    : totalAngles > 0 ? Math.round((totalScannedAngles / totalAngles) * 100) : 0;
   const startedAt = payload.startedAt ? new Date(payload.startedAt).getTime() : null;
   const completedAt = payload.completedAt ? new Date(payload.completedAt).getTime() : null;
   const durationMs =

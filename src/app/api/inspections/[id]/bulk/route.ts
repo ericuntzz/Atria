@@ -66,7 +66,7 @@ export async function POST(
     return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
   }
 
-  const { results, completionTier, notes, events } = body;
+  const { results, completionTier, notes, events, effectiveCoverage } = body;
 
   if (!results || !Array.isArray(results)) {
     return NextResponse.json(
@@ -297,6 +297,9 @@ export async function POST(
         completionTier: validatedTier,
         readinessScore: overallScore,
         notes: (notes as string) || undefined,
+        effectiveCoverage: effectiveCoverage && typeof effectiveCoverage === "object"
+          ? effectiveCoverage
+          : undefined,
         completedAt: new Date(),
       })
       .where(eq(inspections.id, id));

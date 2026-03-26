@@ -209,6 +209,9 @@ export const inspections = pgTable("inspections", {
   completionTier: varchar("completion_tier"), // minimum, standard, thorough
   readinessScore: real("readiness_score"), // 0-100
   notes: text("notes"),
+  /** Effective coverage from the detector model at completion time.
+   *  Stored so summary reload matches live inspection numbers. */
+  effectiveCoverage: jsonb("effective_coverage"),
   startedAt: timestamp("started_at").defaultNow(),
   completedAt: timestamp("completed_at"),
 }, (table) => [

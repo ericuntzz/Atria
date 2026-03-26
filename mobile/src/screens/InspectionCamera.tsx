@@ -2478,12 +2478,27 @@ export default function InspectionCameraScreen() {
 
     try {
       await flushBulkSubmissionQueue();
+      // Build effective coverage data for server persistence
+      const effectiveCoverageData = {
+        overall: Math.round(getEffectiveOverallCoverage(session)),
+        rooms: Array.from(session.getState().visitedRooms.entries()).map(([roomId]) => {
+          const progress = roomDetectorRef.current?.getRoomProgress(roomId);
+          return {
+            roomId,
+            effectiveAnglesScanned: progress?.scanned ?? 0,
+            effectiveAnglesTotal: progress?.total ?? 0,
+            effectiveCoverage: progress ? Math.round(progress.percentage) : 0,
+          };
+        }),
+      };
+
       await submitBulkResults(
         inspectionId,
         results,
         getEffectiveCompletionTier(session),
         undefined,
         eventLog,
+        effectiveCoverageData,
       );
     } catch (err) {
       console.error("Failed to submit results:", err);
