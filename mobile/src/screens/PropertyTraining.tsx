@@ -824,19 +824,30 @@ export default function PropertyTrainingScreen() {
       return false;
     }
 
+    // Lightweight probe: try extracting a single thumbnail from each video.
+    // Don't run the full sharpness-scored extraction (that happens during upload).
+    const videoThumbnails = videoThumbnailsRef.current;
+    if (!videoThumbnails) return false;
+
     for (const video of videos) {
-      const keyframeUris = await extractVideoKeyframeUris(video.uri);
-      try {
-        if (keyframeUris.length > 0) {
-          return true;
+      for (const time of BASE_KEYFRAME_TIMESTAMPS_MS.slice(0, 3)) {
+        try {
+          const thumb = await videoThumbnails.getThumbnailAsync(video.uri, {
+            time,
+            quality: 0.5, // Low quality for probe only
+          });
+          if (thumb?.uri) {
+            deleteLocalMedia(thumb.uri); // Clean up probe thumbnail
+            return true; // At least one frame can be extracted
+          }
+        } catch {
+          continue; // Try next timestamp
         }
-      } finally {
-        keyframeUris.forEach((uri) => deleteLocalMedia(uri));
       }
     }
 
     return false;
-  }, [captures, deleteLocalMedia, extractVideoKeyframeUris]);
+  }, [captures, deleteLocalMedia]);
 
   const handleCancelProcessing = useCallback(() => {
     if (phase !== "uploading" && phase !== "training") return;
