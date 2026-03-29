@@ -61,7 +61,17 @@ export default function FindingsPanel({
   onDismiss,
 }: Props) {
   const processingRef = useRef<Set<string>>(new Set());
-  const [sheetIndex, setSheetIndex] = useState(findings.length > 1 ? 1 : 0);
+  const [sheetIndex, setSheetIndex] = useState(0);
+  const [dismissed, setDismissed] = useState(false);
+  const sheetRef = useRef<BottomSheet>(null);
+
+  // Re-show the sheet when new findings arrive
+  React.useEffect(() => {
+    if (findings.length > 0 && dismissed) {
+      setDismissed(false);
+      sheetRef.current?.snapToIndex(0);
+    }
+  }, [findings.length, dismissed]);
 
   const handleConfirm = useCallback(
     (id: string) => {
@@ -108,16 +118,18 @@ export default function FindingsPanel({
     [onDismiss],
   );
 
-  if (findings.length === 0) return null;
+  if (findings.length === 0 || dismissed) return null;
 
   const expanded = sheetIndex >= SNAP_POINTS.length - 1;
 
   return (
     <BottomSheet
+      ref={sheetRef}
       index={0}
       snapPoints={SNAP_POINTS}
       topInset={24}
-      enablePanDownToClose={false}
+      enablePanDownToClose={true}
+      onClose={() => setDismissed(true)}
       backgroundStyle={styles.sheetBackground}
       handleIndicatorStyle={styles.handleIndicator}
       style={styles.sheet}
