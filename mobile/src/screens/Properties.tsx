@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useRef, useEffect } from "react";
+import React, { useState, useCallback, useRef, useEffect, useMemo } from "react";
 import {
   View,
   Text,
@@ -34,7 +34,10 @@ interface Property {
   coverImageUrl: string | null;
   bedrooms: number | null;
   bathrooms: number | null;
+  createdAt: string;
 }
+
+type SortOption = "newest" | "name" | "ready_first" | "needs_training";
 
 export default function PropertiesScreen() {
   const navigation = useNavigation<Nav>();
@@ -57,6 +60,8 @@ export default function PropertiesScreen() {
   const [selectionMode, setSelectionMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [bulkDeleting, setBulkDeleting] = useState(false);
+  const [showSortModal, setShowSortModal] = useState(false);
+  const [sortBy, setSortBy] = useState<SortOption>("newest");
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
@@ -112,6 +117,24 @@ export default function PropertiesScreen() {
   const trainedCount = properties.filter(
     (p) => p.trainingStatus === "trained",
   ).length;
+
+  const sortedProperties = useMemo(() => {
+    const statusRank = (status: string) => {
+      if (status === "trained") return 0;
+      if (status === "training") return 1;
+      return 2;
+    };
+
+    return [...properties].sort((a, b) => {
+      if (sortBy === "name") return a.name.localeCompare(b.name);
+      if (sortBy === "ready_first") return statusRank(a.trainingStatus) - statusRank(b.trainingStatus);
+      if (sortBy === "needs_training") return statusRank(b.trainingStatus) - statusRank(a.trainingStatus);
+
+      const aTime = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+      const bTime = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+      return bTime - aTime;
+    });
+  }, [properties, sortBy]);
 
   const closeAddModal = useCallback(() => {
     setShowAddModal(false);
@@ -360,11 +383,22 @@ export default function PropertiesScreen() {
             {properties.length > 0
               ? selectionMode
                 ? `${selectedIds.size} selected`
-                : `${trainedCount} of ${properties.length} ready`
+                : `${trainedCount} of ${properties.length} ready · ${sortBy === "newest" ? "Newest" : sortBy === "name" ? "A-Z" : sortBy === "ready_first" ? "Ready first" : "Needs training first"}`
               : "No properties yet"}
           </Text>
         </View>
         <View style={styles.headerActions}>
+          {properties.length > 1 && !selectionMode && (
+            <TouchableOpacity
+              onPress={() => setShowSortModal(true)}
+              style={styles.selectButton}
+              activeOpacity={0.7}
+              accessibilityRole="button"
+              accessibilityLabel="Sort properties"
+            >
+              <Text style={styles.selectButtonText}>Sort</Text>
+            </TouchableOpacity>
+          )}
           {properties.length > 0 && (
             <TouchableOpacity
               onPress={toggleSelectionMode}
@@ -396,7 +430,7 @@ export default function PropertiesScreen() {
       </View>
 
       <FlatList
-        data={properties}
+        data={sortedProperties}
         keyExtractor={(item) => item.id}
         renderItem={renderProperty}
         extraData={selectionMode ? selectedIds : undefined}
@@ -499,6 +533,48 @@ export default function PropertiesScreen() {
           </TouchableOpacity>
         </View>
       )}
+
+      <Modal
+        visible={showSortModal}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setShowSortModal(false)}
+      >
+        <Pressable style={styles.modalBackdrop} onPress={() => setShowSortModal(false)} />
+        <View style={styles.sortSheetWrap}>
+          <View style={styles.sortSheet}>
+            <Text style={styles.modalTitle}>Sort Properties</Text>
+            <Text style={styles.modalSubtitle}>Choose how the property list should be ordered</Text>
+
+            {([
+              { key: "newest", label: "Newest first" },
+              { key: "name", label: "Name A-Z" },
+              { key: "ready_first", label: "Ready first" },
+              { key: "needs_training", label: "Needs training first" },
+            ] as Array<{ key: SortOption; label: string }>).map((option) => {
+              const selected = sortBy === option.key;
+              return (
+                <TouchableOpacity
+                  key={option.key}
+                  style={[styles.sortOption, selected && styles.sortOptionSelected]}
+                  onPress={() => {
+                    setSortBy(option.key);
+                    setShowSortModal(false);
+                  }}
+                  activeOpacity={0.7}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Sort by ${option.label}`}
+                >
+                  <Text style={[styles.sortOptionText, selected && styles.sortOptionTextSelected]}>
+                    {option.label}
+                  </Text>
+                  {selected && <Text style={styles.sortOptionCheck}>✓</Text>}
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+        </View>
+      </Modal>
 
       {/* Add Property Modal */}
       <Modal
@@ -852,6 +928,50 @@ const styles = StyleSheet.create({
   },
 
   // Modal
+  sortSheetWrap: {
+    ...StyleSheet.absoluteFillObject,
+    justifyContent: "flex-end",
+    padding: 20,
+  },
+  sortSheet: {
+    backgroundColor: colors.card,
+    borderRadius: radius.xl,
+    padding: 20,
+    borderWidth: 1,
+    borderColor: colors.stone,
+    ...shadows.elevated,
+  },
+  sortOption: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    paddingVertical: 14,
+    paddingHorizontal: 14,
+    borderRadius: radius.md,
+    backgroundColor: colors.secondary,
+    borderWidth: 1,
+    borderColor: colors.cardBorder,
+    marginTop: 10,
+  },
+  sortOptionSelected: {
+    borderColor: colors.primary,
+    backgroundColor: "rgba(77, 166, 255, 0.08)",
+  },
+  sortOptionText: {
+    color: colors.heading,
+    fontSize: 15,
+    fontWeight: "500",
+  },
+  sortOptionTextSelected: {
+    color: colors.primary,
+    fontWeight: "600",
+  },
+  sortOptionCheck: {
+    color: colors.primary,
+    fontSize: 16,
+    fontWeight: "700",
+  },
+
   modalOverlay: {
     flex: 1,
     justifyContent: "center",
