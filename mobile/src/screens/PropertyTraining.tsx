@@ -1099,7 +1099,11 @@ export default function PropertyTrainingScreen() {
   if (phase === "intro") {
     return (
       <SafeAreaView style={styles.container} edges={["top", "bottom"]}>
-        <View style={styles.introContent}>
+        <ScrollView
+          contentContainerStyle={styles.introContent}
+          showsVerticalScrollIndicator={false}
+          bounces
+        >
           <TouchableOpacity
             style={styles.backButton}
             onPress={() => navigation.goBack()}
@@ -1178,7 +1182,7 @@ export default function PropertyTrainingScreen() {
           >
             <Text style={styles.startButtonText}>Start Capture</Text>
           </TouchableOpacity>
-        </View>
+        </ScrollView>
       </SafeAreaView>
     );
   }
@@ -1859,7 +1863,7 @@ const styles = StyleSheet.create({
 
   // ── Intro Phase ──
   introContent: {
-    flex: 1,
+    flexGrow: 1,
     padding: 20,
     paddingTop: 12,
   },
