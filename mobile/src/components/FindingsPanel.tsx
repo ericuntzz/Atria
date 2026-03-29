@@ -18,7 +18,8 @@ interface Props {
   onDismiss: (id: string, reason?: DismissReason) => void;
 }
 
-const SNAP_POINTS = ["24%", "58%", "92%"];
+// Smaller initial snap so bottom controls remain accessible. User can swipe up to review.
+const SNAP_POINTS = ["12%", "45%", "85%"];
 
 const SEVERITY_COLORS: Record<string, string> = {
   cosmetic: "#64748b",
@@ -113,8 +114,7 @@ export default function FindingsPanel({
 
   return (
     <BottomSheet
-      key={findings.map((finding) => finding.id).join(":")}
-      index={findings.length > 1 ? 1 : 0}
+      index={0}
       snapPoints={SNAP_POINTS}
       topInset={24}
       enablePanDownToClose={false}
@@ -129,7 +129,7 @@ export default function FindingsPanel({
             {findings.length} finding{findings.length !== 1 ? "s" : ""}
           </Text>
           <Text style={styles.expandHint}>
-            {expanded ? "Swipe down to review the room" : "Swipe up for full review"}
+            {expanded ? "Swipe down to continue scanning" : "Swipe up to review"}
           </Text>
         </View>
 
@@ -209,7 +209,7 @@ export default function FindingsPanel({
                     accessibilityLabel={`Mark finding inaccurate: ${finding.description}`}
                   >
                     <Text style={[styles.actionText, styles.dismissText]}>
-                      Not Accurate
+                      Dismiss
                     </Text>
                   </TouchableOpacity>
                 </View>
@@ -251,7 +251,7 @@ const styles = StyleSheet.create({
     gap: 12,
   },
   header: {
-    color: "#4DA6FF",
+    color: "#2372B8",
     fontSize: 15,
     fontWeight: "700",
     letterSpacing: 0.2,
@@ -311,7 +311,7 @@ const styles = StyleSheet.create({
   },
   severityPillText: {
     color: "#fff",
-    fontSize: 9,
+    fontSize: 11,
     fontWeight: "700",
     letterSpacing: 0.4,
   },

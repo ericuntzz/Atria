@@ -28,6 +28,8 @@ import {
   Easing,
   BackHandler,
   Linking,
+  AppState,
+  type AppStateStatus,
 } from "react-native";
 import { Image } from "expo-image";
 import { SafeAreaView } from "react-native-safe-area-context";
@@ -510,6 +512,23 @@ export default function PropertyTrainingScreen() {
       releaseCapturedMedia(capturesRef.current);
     };
   }, [releaseCapturedMedia]);
+
+  // Pause animations and camera when backgrounded, resume on foreground
+  useEffect(() => {
+    const handleAppState = (state: AppStateStatus) => {
+      if (state === "active") {
+        // Resume — animations restart naturally via their useEffect deps
+      } else {
+        // Background — stop recording if active to release audio session
+        if (isRecordingRef.current && cameraRef.current) {
+          cameraRef.current.stopRecording?.();
+          isRecordingRef.current = false;
+        }
+      }
+    };
+    const sub = AppState.addEventListener("change", handleAppState);
+    return () => sub.remove();
+  }, []);
 
   const handleStartCapture = useCallback(async () => {
     if (!permission?.granted) {

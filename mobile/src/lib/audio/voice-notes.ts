@@ -137,10 +137,11 @@ export function createVoiceNoteRecorder(
 
       if (!uri) return null;
 
-      // Reset audio mode
+      // Reset audio mode — keep playsInSilentModeIOS true so TTS announcer still works
       if (audioModule) {
         await audioModule.setAudioModeAsync({
           allowsRecordingIOS: false,
+          playsInSilentModeIOS: true,
         });
       }
 
@@ -180,6 +181,7 @@ export function createVoiceNoteRecorder(
       if (audioModule) {
         await audioModule.setAudioModeAsync({
           allowsRecordingIOS: false,
+          playsInSilentModeIOS: true,
         });
       }
     } catch {

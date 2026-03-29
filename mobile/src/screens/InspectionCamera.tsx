@@ -224,6 +224,8 @@ export default function InspectionCameraScreen() {
   const [showNotesLogModal, setShowNotesLogModal] = useState(false);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
   const [noteText, setNoteText] = useState("");
+  const [submissionStatus, setSubmissionStatus] = useState<string | null>(null);
+  const [isInitializing, setIsInitializing] = useState(true);
   const [isRecordingVoice, setIsRecordingVoice] = useState(false);
   const voiceRecorderRef = useRef<VoiceNoteRecorder | null>(null);
   const yoloModelRef = useRef<YoloModelLoader | null>(null);
@@ -1404,6 +1406,10 @@ export default function InspectionCameraScreen() {
         clearTimeout(yoloLoadTimerRef.current);
         yoloLoadTimerRef.current = null;
       }
+      // Flush and pause batch analyzer to free buffered base64 frames
+      batchAnalyzerRef.current?.pause();
+      // Clear pending batch frames to free base64 data URIs from memory
+      pendingBatchFramesRef.current.clear();
       // Also dispose YOLO model + stop its timer to free additional memory
       stopYoloLoop();
       if (yoloModelRef.current?.isLoaded) {
@@ -1750,6 +1756,7 @@ export default function InspectionCameraScreen() {
           const firstRoom = mappedRooms[0];
           activateRoom(session, firstRoom.roomId, firstRoom.roomName);
         }
+        setIsInitializing(false);
 
         // Seed finding suppression from server feedback (cross-inspection learning).
         // Non-blocking — if it fails, the inspection still works with session-local suppression only.
@@ -1769,6 +1776,7 @@ export default function InspectionCameraScreen() {
           console.warn("[Feedback] Failed to load property feedback:", err);
         });
       } catch (err) {
+        setIsInitializing(false);
         console.error("Failed to load baselines:", err);
         Alert.alert(
           "Failed to load baselines",
@@ -2588,16 +2596,28 @@ export default function InspectionCameraScreen() {
       }
     }
 
-    // Give in-flight AI analyses a short chance to land without asking the user to wait.
+    // Give in-flight AI analyses a short chance to land — non-blocking with spinner UI.
     let pendingCount = pendingAnalysesRef.current.size;
     if (pendingCount > 0) {
-      showCaptureHint(`Finishing inspection... waiting on ${pendingCount} analysis${pendingCount === 1 ? "" : "es"}`);
-      const waitDeadline = Date.now() + 8000;
-      while (pendingAnalysesRef.current.size > 0 && Date.now() < waitDeadline) {
-        // Let onResult/onStatus callbacks drain naturally.
-        // eslint-disable-next-line no-await-in-loop
-        await new Promise((resolve) => setTimeout(resolve, 250));
-      }
+      setSubmissionStatus(`Waiting on ${pendingCount} analysis${pendingCount === 1 ? "" : "es"}...`);
+      // Non-blocking drain: wait up to 8s using a promise that resolves when
+      // pending analyses drain OR timeout expires. No UI thread blocking.
+      await new Promise<void>((resolve) => {
+        const checkInterval = setInterval(() => {
+          const remaining = pendingAnalysesRef.current.size;
+          if (remaining > 0) {
+            setSubmissionStatus(`Waiting on ${remaining} analysis${remaining === 1 ? "" : "es"}...`);
+          }
+          if (remaining === 0) {
+            clearInterval(checkInterval);
+            resolve();
+          }
+        }, 250);
+        setTimeout(() => {
+          clearInterval(checkInterval);
+          resolve();
+        }, 8000);
+      });
       pendingCount = pendingAnalysesRef.current.size;
       if (pendingCount > 0) {
         console.warn(
@@ -2709,9 +2729,12 @@ export default function InspectionCameraScreen() {
         }),
     };
 
+    // Map result IDs from server response so note deletion works from the initial summary
+    let serverResultIds: Array<{ id: string; roomId: string; baselineImageId: string }> = [];
     try {
+      setSubmissionStatus("Submitting results...");
       await flushBulkSubmissionQueue();
-      await submitBulkResults(
+      const submitResponse = await submitBulkResults(
         inspectionId,
         results,
         getEffectiveCompletionTier(session),
@@ -2719,6 +2742,13 @@ export default function InspectionCameraScreen() {
         eventLog,
         effectiveCoverageData,
       );
+      if (submitResponse?.results && Array.isArray(submitResponse.results)) {
+        serverResultIds = submitResponse.results.map((r: { id: string; roomId: string; baselineImageId: string }) => ({
+          id: r.id,
+          roomId: r.roomId,
+          baselineImageId: r.baselineImageId,
+        }));
+      }
     } catch (err) {
       console.error("Failed to submit results:", err);
       try {
@@ -2749,6 +2779,8 @@ export default function InspectionCameraScreen() {
       const roomBaseline = baselinesRef.current.find((r) => r.roomId === roomId);
       const anglesTotal = roomBaseline?.baselines?.length || 0;
 
+      // Map server result IDs to findings for note deletion support
+      const roomResultId = serverResultIds.find(r => r.roomId === roomId)?.id;
       const roomFindings: SummaryFindingData[] = visit.findings.map((f) => ({
         id: f.id,
         description: f.description,
@@ -2758,6 +2790,7 @@ export default function InspectionCameraScreen() {
         status: f.status,
         roomName: visit.roomName,
         source: f.category === "manual_note" ? "manual_note" : "ai",
+        resultId: roomResultId,
       }));
 
       const confirmed = visit.findings.filter((f) => f.status === "confirmed");
@@ -2771,6 +2804,7 @@ export default function InspectionCameraScreen() {
           roomName: visit.roomName,
           status: cf.status,
           source: cf.category === "manual_note" ? "manual_note" : "ai",
+          resultId: roomResultId,
         });
       }
 
@@ -3903,6 +3937,30 @@ export default function InspectionCameraScreen() {
         onConfirm={handleConfirmFinding}
         onDismiss={handleDismissFinding}
       />
+
+      {/* Loading overlay — shown while baselines are loading */}
+      {isInitializing && (
+        <View style={styles.submissionOverlay}>
+          <View style={styles.submissionCard}>
+            <Ionicons name="scan-outline" size={28} color="#2372B8" />
+            <Text style={styles.submissionText}>Preparing inspection...</Text>
+            <Text style={styles.submissionSubtext}>Loading room data and AI models</Text>
+          </View>
+        </View>
+      )}
+
+      {/* Submission overlay — replaces blocking wait loop */}
+      {submissionStatus && (
+        <View style={styles.submissionOverlay}>
+          <View style={styles.submissionCard}>
+            <Animated.View style={{ transform: [{ rotate: '0deg' }] }}>
+              <Ionicons name="sync-outline" size={28} color="#2372B8" />
+            </Animated.View>
+            <Text style={styles.submissionText}>{submissionStatus}</Text>
+            <Text style={styles.submissionSubtext}>Coverage is already saved</Text>
+          </View>
+        </View>
+      )}
     </View>
   );
 }
@@ -3911,6 +3969,32 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: colors.camera.background,
+  },
+  submissionOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: "rgba(0,0,0,0.7)",
+    justifyContent: "center",
+    alignItems: "center",
+    zIndex: 100,
+  },
+  submissionCard: {
+    backgroundColor: "rgba(15,20,30,0.95)",
+    borderRadius: 20,
+    paddingHorizontal: 32,
+    paddingVertical: 28,
+    alignItems: "center",
+    gap: 12,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.08)",
+  },
+  submissionText: {
+    color: "#fff",
+    fontSize: 16,
+    fontWeight: "600",
+  },
+  submissionSubtext: {
+    color: "rgba(255,255,255,0.5)",
+    fontSize: 13,
   },
   zoomIndicator: {
     position: "absolute",

@@ -140,6 +140,9 @@ export default function InspectionStartScreen() {
               ]}
               onPress={() => setSelectedMode(mode.key)}
               activeOpacity={0.7}
+              accessibilityRole="radio"
+              accessibilityState={{ selected: isSelected }}
+              accessibilityLabel={`${mode.label}: ${mode.description}`}
             >
               <View style={styles.modeCardInner}>
                 {/* Mode icon */}
