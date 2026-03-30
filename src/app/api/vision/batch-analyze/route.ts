@@ -138,8 +138,11 @@ export async function POST(request: NextRequest) {
     };
 
     // Build multi-image prompt for Claude
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const content: any[] = [
+    const content: Array<{
+      type: string;
+      text?: string;
+      source?: { type: string; media_type: string; data: string };
+    }> = [
       {
         type: "text",
         text: `You are a Master Home Inspector analyzing ${batchFrames.length} views of "${roomName}" in a luxury vacation rental. You have BOTH baseline images (how the room should look) AND current images (how it looks now) for each angle.

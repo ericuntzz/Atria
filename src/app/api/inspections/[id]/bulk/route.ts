@@ -98,6 +98,18 @@ export async function POST(
   const inspectionEventRows: BulkInspectionEvent[] = Array.isArray(events)
     ? (events as BulkInspectionEvent[])
     : [];
+  const parsedEffectiveCoverage =
+    effectiveCoverage && typeof effectiveCoverage === "object"
+      ? (effectiveCoverage as {
+          overall?: unknown;
+          rooms?: Array<{
+            roomId?: unknown;
+            effectiveAnglesScanned?: unknown;
+            effectiveAnglesTotal?: unknown;
+            effectiveCoverage?: unknown;
+          }>;
+        })
+      : null;
 
   // Validate all room IDs and baseline image IDs belong to this property
   const propertyRooms = await db
@@ -227,6 +239,84 @@ export async function POST(
     }
   }
 
+  if (parsedEffectiveCoverage) {
+    if (
+      parsedEffectiveCoverage.overall !== undefined &&
+      (typeof parsedEffectiveCoverage.overall !== "number" ||
+        parsedEffectiveCoverage.overall < 0 ||
+        parsedEffectiveCoverage.overall > 100)
+    ) {
+      return NextResponse.json(
+        { error: "effectiveCoverage.overall must be a number between 0 and 100" },
+        { status: 400 },
+      );
+    }
+    if (
+      parsedEffectiveCoverage.rooms !== undefined &&
+      !Array.isArray(parsedEffectiveCoverage.rooms)
+    ) {
+      return NextResponse.json(
+        { error: "effectiveCoverage.rooms must be an array when provided" },
+        { status: 400 },
+      );
+    }
+    for (const roomCoverage of parsedEffectiveCoverage.rooms || []) {
+      if (!roomCoverage || typeof roomCoverage !== "object") {
+        return NextResponse.json(
+          { error: "Each effectiveCoverage.rooms entry must be an object" },
+          { status: 400 },
+        );
+      }
+      if (
+        typeof roomCoverage.roomId !== "string" ||
+        !isValidUUID(roomCoverage.roomId) ||
+        !validRoomIds.has(roomCoverage.roomId)
+      ) {
+        return NextResponse.json(
+          { error: "effectiveCoverage roomId must be a valid property room UUID" },
+          { status: 400 },
+        );
+      }
+      if (
+        typeof roomCoverage.effectiveAnglesScanned !== "number" ||
+        roomCoverage.effectiveAnglesScanned < 0 ||
+        !Number.isFinite(roomCoverage.effectiveAnglesScanned)
+      ) {
+        return NextResponse.json(
+          { error: "effectiveAnglesScanned must be a non-negative number" },
+          { status: 400 },
+        );
+      }
+      if (
+        typeof roomCoverage.effectiveAnglesTotal !== "number" ||
+        roomCoverage.effectiveAnglesTotal < 0 ||
+        !Number.isFinite(roomCoverage.effectiveAnglesTotal)
+      ) {
+        return NextResponse.json(
+          { error: "effectiveAnglesTotal must be a non-negative number" },
+          { status: 400 },
+        );
+      }
+      if (roomCoverage.effectiveAnglesScanned > roomCoverage.effectiveAnglesTotal) {
+        return NextResponse.json(
+          { error: "effectiveAnglesScanned cannot exceed effectiveAnglesTotal" },
+          { status: 400 },
+        );
+      }
+      if (
+        typeof roomCoverage.effectiveCoverage !== "number" ||
+        roomCoverage.effectiveCoverage < 0 ||
+        roomCoverage.effectiveCoverage > 100 ||
+        !Number.isFinite(roomCoverage.effectiveCoverage)
+      ) {
+        return NextResponse.json(
+          { error: "effectiveCoverage must be a number between 0 and 100" },
+          { status: 400 },
+        );
+      }
+    }
+  }
+
   // Validate baseline images belong to correct rooms in this property (scoped to this property's rooms)
   const roomIds = propertyRooms.map((r) => r.id);
   const validBaselineRows = roomIds.length > 0
@@ -298,8 +388,8 @@ export async function POST(
         completionTier: validatedTier,
         readinessScore: overallScore,
         notes: (notes as string) || undefined,
-        effectiveCoverage: effectiveCoverage && typeof effectiveCoverage === "object"
-          ? effectiveCoverage
+        effectiveCoverage: parsedEffectiveCoverage
+          ? parsedEffectiveCoverage
           : undefined,
         completedAt: new Date(),
       })

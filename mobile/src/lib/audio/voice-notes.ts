@@ -113,6 +113,16 @@ export function createVoiceNoteRecorder(
 
       return true;
     } catch (err) {
+      try {
+        if (audioModule) {
+          await audioModule.setAudioModeAsync({
+            allowsRecordingIOS: false,
+            playsInSilentModeIOS: true,
+          });
+        }
+      } catch {
+        // Ignore audio-mode recovery failures after a failed start.
+      }
       console.warn("[VoiceNotes] Failed to start recording:", err);
       return false;
     }

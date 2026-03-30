@@ -224,6 +224,13 @@ export default function PropertyTrainingScreen() {
   const [previewMessage, setPreviewMessage] = useState<string | null>(null);
   const lastPreviewCountRef = useRef(0); // Track how many uploads triggered the last preview
   const previewInFlightRef = useRef(false);
+  const resetPreviewState = useCallback(() => {
+    setDiscoveredRooms([]);
+    setDiscoveredItemCount(0);
+    setPreviewMessage(null);
+    lastPreviewCountRef.current = 0;
+    previewInFlightRef.current = false;
+  }, []);
 
   const resetBackgroundUploadState = useCallback(() => {
     uploadCancelledRef.current = true;
@@ -694,8 +701,9 @@ export default function PropertyTrainingScreen() {
     setTrainingResult(null);
     setIsAddMore(false);
     previousResultRef.current = null;
+    resetPreviewState();
     setPhase("capturing");
-  }, [clearCapturedMedia, permission, requestPermission]);
+  }, [clearCapturedMedia, permission, requestPermission, resetPreviewState]);
 
   const handleCapture = useCallback(async () => {
     if (!cameraRef.current || isCapturingRef.current) return;
@@ -1595,6 +1603,7 @@ export default function PropertyTrainingScreen() {
               clearCapturedMedia(capturesRef.current);
               setTrainingResult(null);
               setIsAddMore(true);
+              resetPreviewState();
               setPhase("capturing");
             }}
             activeOpacity={0.8}
