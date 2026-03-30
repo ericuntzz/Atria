@@ -1508,6 +1508,83 @@ function generateBasicStructure(imageUrls: string[]): PropertyAnalysis {
   };
 }
 
+function collapseGenericRooms(
+  rooms: RoomAnalysis[],
+  fallbackImageUrls: string[],
+): PropertyAnalysis {
+  if (rooms.length === 0) {
+    return generateBasicStructure(fallbackImageUrls);
+  }
+
+  const mergedItems: NonNullable<RoomAnalysis["items"]> = [];
+  const seenItems = new Set<string>();
+  const mergedLabels: Record<string, string> = {};
+  const mergedClassifications: NonNullable<RoomAnalysis["image_classifications"]> = {};
+  let mergedDescription = "";
+  let mergedRoomType = "other";
+
+  for (const room of rooms) {
+    const roomItems = Array.isArray(room.items) ? room.items : [];
+    for (const item of roomItems) {
+      const name = typeof item?.name === "string" ? item.name.trim() : "";
+      const category = typeof item?.category === "string" ? item.category.trim() : "";
+      const key = `${name.toLowerCase()}::${category.toLowerCase()}`;
+      if (!name || seenItems.has(key)) continue;
+      seenItems.add(key);
+      mergedItems.push(item);
+    }
+
+    const labels = room.image_labels && typeof room.image_labels === "object"
+      ? room.image_labels
+      : room.imageLabels && typeof room.imageLabels === "object"
+        ? room.imageLabels
+        : {};
+    Object.assign(mergedLabels, labels);
+
+    const classifications = room.image_classifications && typeof room.image_classifications === "object"
+      ? room.image_classifications
+      : room.imageClassifications && typeof room.imageClassifications === "object"
+        ? room.imageClassifications
+        : {};
+    Object.assign(mergedClassifications, classifications);
+
+    if (!mergedDescription && typeof room.description === "string" && room.description.trim()) {
+      mergedDescription = room.description.trim();
+    }
+
+    const roomType = typeof room.room_type === "string"
+      ? room.room_type
+      : typeof room.roomType === "string"
+        ? room.roomType
+        : "";
+    if (roomType && mergedRoomType === "other") {
+      mergedRoomType = roomType;
+    }
+  }
+
+  const imageUrls = [
+    ...new Set(
+      rooms.flatMap((room) => getRoomImageUrls(room)).filter((url) => url.trim().length > 0),
+    ),
+  ];
+
+  return {
+    rooms: [
+      {
+        name: "Primary Room",
+        room_type: mergedRoomType,
+        description:
+          mergedDescription || "Auto-merged from generic room names (manual review recommended)",
+        image_urls: imageUrls.length > 0 ? imageUrls : [...fallbackImageUrls],
+        image_labels: Object.keys(mergedLabels).length > 0 ? mergedLabels : undefined,
+        image_classifications:
+          Object.keys(mergedClassifications).length > 0 ? mergedClassifications : undefined,
+        items: mergedItems,
+      },
+    ],
+  };
+}
+
 function normalizeAnalysis(
   analysis: PropertyAnalysis,
   imageUrls: string[],
@@ -1595,7 +1672,7 @@ function normalizeAnalysis(
   });
 
   if (hasOnlyGenericNames && normalizedRooms.length > 1) {
-    return generateBasicStructure(imageUrls);
+    return collapseGenericRooms(normalizedRooms, imageUrls);
   }
 
   return { rooms: normalizedRooms };
