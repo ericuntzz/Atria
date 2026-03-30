@@ -211,6 +211,14 @@ export default function PropertyTrainingScreen() {
   const uploadQueueRef = useRef<Set<string>>(new Set()); // capture IDs queued for upload
   const uploadActiveRef = useRef(false); // mutex to prevent concurrent queue processing
   const uploadCancelledRef = useRef(false);
+  const uploadPromisesRef = useRef<Map<string, Promise<string[]>>>(new Map());
+
+  const resetBackgroundUploadState = useCallback(() => {
+    uploadCancelledRef.current = true;
+    uploadQueueRef.current.clear();
+    uploadPromisesRef.current.clear();
+    setUploadStatuses(new Map());
+  }, []);
 
   const processUploadQueue = useCallback(async () => {
     if (uploadActiveRef.current || uploadCancelledRef.current) return;
@@ -223,24 +231,37 @@ export default function PropertyTrainingScreen() {
 
       for (const capture of pending) {
         if (uploadCancelledRef.current) break;
-        if (uploadedIdsRef.current.has(capture.id)) continue; // already done
+        if (uploadedIdsRef.current.has(capture.id)) continue;
+        if (!capturesRef.current.some((item) => item.id === capture.id)) {
+          uploadQueueRef.current.delete(capture.id);
+          continue;
+        }
 
-        // Mark as uploading
         setUploadStatuses((prev) => new Map(prev).set(capture.id, "uploading"));
 
+        const uploadPromise = uploadBase64Image(
+          `data:image/jpeg;base64,${capture.base64}`,
+          propertyId,
+          `training-${Date.now()}.jpg`,
+        ).then((result) => [result.id]);
+        uploadPromisesRef.current.set(capture.id, uploadPromise);
+
         try {
-          const result = await uploadBase64Image(
-            `data:image/jpeg;base64,${capture.base64}`,
-            propertyId,
-            `training-${Date.now()}.jpg`,
-          );
-          uploadedIdsRef.current.set(capture.id, [result.id]);
+          const uploadedIds = await uploadPromise;
+          if (uploadCancelledRef.current || !capturesRef.current.some((item) => item.id === capture.id)) {
+            uploadQueueRef.current.delete(capture.id);
+            continue;
+          }
+          uploadedIdsRef.current.set(capture.id, uploadedIds);
           uploadQueueRef.current.delete(capture.id);
           setUploadStatuses((prev) => new Map(prev).set(capture.id, "uploaded"));
         } catch (err) {
-          console.warn("[BackgroundUpload] Failed for capture", capture.id, err);
-          setUploadStatuses((prev) => new Map(prev).set(capture.id, "failed"));
-          // Don't block queue — continue with other captures
+          if (!uploadCancelledRef.current && capturesRef.current.some((item) => item.id === capture.id)) {
+            console.warn("[BackgroundUpload] Failed for capture", capture.id, err);
+            setUploadStatuses((prev) => new Map(prev).set(capture.id, "failed"));
+          }
+        } finally {
+          uploadPromisesRef.current.delete(capture.id);
         }
       }
     } finally {
@@ -251,6 +272,8 @@ export default function PropertyTrainingScreen() {
   // Trigger background upload when new photo captures are added
   useEffect(() => {
     if (phase !== "capturing") return;
+
+    uploadCancelledRef.current = false;
 
     const newPhotos = captures.filter(
       (c) => c.type === "photo" && !uploadQueueRef.current.has(c.id) && !uploadedIdsRef.current.has(c.id),
@@ -263,9 +286,9 @@ export default function PropertyTrainingScreen() {
       setUploadStatuses((prev) => new Map(prev).set(photo.id, "pending"));
     }
 
-    // Process queue in background (fire-and-forget)
     void processUploadQueue();
   }, [captures, phase, processUploadQueue]);
+
   const trainingAbortRef = useRef<AbortController | null>(null);
   const videoTrainingCapability = useMemo(() => getVideoTrainingCapability(), []);
   const videoKeyframesAvailable = videoThumbnailsRef.current !== null;
@@ -323,6 +346,7 @@ export default function PropertyTrainingScreen() {
       media.forEach((capture) => deleteCapturedFiles(capture));
       capturesRef.current = [];
       uploadedIdsRef.current.clear();
+      resetBackgroundUploadState();
     },
     [deleteCapturedFiles],
   );
@@ -573,9 +597,10 @@ export default function PropertyTrainingScreen() {
 
   useEffect(() => {
     return () => {
+      resetBackgroundUploadState();
       releaseCapturedMedia(capturesRef.current);
     };
-  }, [releaseCapturedMedia]);
+  }, [releaseCapturedMedia, resetBackgroundUploadState]);
 
   // Pause animations and camera when backgrounded, resume on foreground
   useEffect(() => {
@@ -638,9 +663,8 @@ export default function PropertyTrainingScreen() {
           uri: photo.uri,
         };
         setCaptures((prev) => [...prev, newCapture]);
-        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+        void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
 
-        // Flash animation for capture feedback
         captureFlashAnim.setValue(1);
         Animated.timing(captureFlashAnim, {
           toValue: 0,
@@ -649,7 +673,6 @@ export default function PropertyTrainingScreen() {
           useNativeDriver: true,
         }).start();
 
-        // Auto-scroll thumbnail strip to newest capture
         setTimeout(() => {
           thumbnailListRef.current?.scrollToEnd({ animated: true });
         }, 100);
@@ -657,11 +680,11 @@ export default function PropertyTrainingScreen() {
     } catch (err) {
       console.error("Capture failed:", err);
       setError("Capture failed. Please try again.");
-      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+      void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
     } finally {
       isCapturingRef.current = false;
     }
-  }, []);
+  }, [captureFlashAnim]);
 
   const extractVideoPreviewUri = useCallback(async (videoUri: string) => {
     const videoThumbnails = videoThumbnailsRef.current;
@@ -773,6 +796,7 @@ export default function PropertyTrainingScreen() {
     // Clear cached upload ID and background upload tracking
     uploadedIdsRef.current.delete(id);
     uploadQueueRef.current.delete(id);
+    uploadPromisesRef.current.delete(id);
     setUploadStatuses((prev) => { const next = new Map(prev); next.delete(id); return next; });
     setCaptures((prev) => {
       const capture = prev.find((item) => item.id === id);
@@ -783,7 +807,7 @@ export default function PropertyTrainingScreen() {
       capturesRef.current = next;
       return next;
     });
-  }, [deleteCapturedFiles]);
+  }, [deleteCapturedFiles, resetBackgroundUploadState]);
 
   const isRunActive = useCallback((runId: number) => {
     return runIdRef.current === runId && !cancelRequestedRef.current;
@@ -975,6 +999,16 @@ export default function PropertyTrainingScreen() {
 
         const capture = captures[i];
         setUploadProgress({ current: progressCurrent, total });
+        const inFlightUpload = uploadPromisesRef.current.get(capture.id);
+        if (inFlightUpload) {
+          try {
+            const awaitedIds = await inFlightUpload;
+            uploadedIdsRef.current.set(capture.id, awaitedIds);
+          } catch {
+            // Fall through to the regular upload path below.
+          }
+        }
+
         const existingIds = uploadedIdsRef.current.get(capture.id);
         const uploadedForCapture = existingIds ? [...existingIds] : [];
         const hasReusableUpload =
@@ -1787,7 +1821,17 @@ export default function PropertyTrainingScreen() {
                     isDisabled && styles.finishButtonTextDisabled,
                   ]}
                 >
-                  Done ({captures.length})
+                  {(() => {
+                    const uploadedCount = captures.filter(c => uploadStatuses.get(c.id) === "uploaded").length;
+                    const photoCount = captures.filter(c => c.type === "photo").length;
+                    if (uploadedCount > 0 && uploadedCount >= photoCount) {
+                      return `Done (${captures.length}) ✓`;
+                    }
+                    if (uploadedCount > 0) {
+                      return `Done (${captures.length}) · ${uploadedCount} uploaded`;
+                    }
+                    return `Done (${captures.length})`;
+                  })()}
                 </Text>
               </TouchableOpacity>
             );
