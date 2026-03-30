@@ -1406,8 +1406,9 @@ export default function InspectionCameraScreen() {
         clearTimeout(yoloLoadTimerRef.current);
         yoloLoadTimerRef.current = null;
       }
-      // Flush and pause batch analyzer to free buffered base64 frames
+      // Pause and clear the batch analyzer's own buffered frames to free memory.
       batchAnalyzerRef.current?.pause();
+      batchAnalyzerRef.current?.clearBufferedFrames();
       // Clear pending batch frames to free base64 data URIs from memory
       pendingBatchFramesRef.current.clear();
       // Also dispose YOLO model + stop its timer to free additional memory

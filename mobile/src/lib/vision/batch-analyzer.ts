@@ -226,6 +226,15 @@ export class BatchAnalyzer {
     this.roomTimers.clear();
   }
 
+  clearBufferedFrames(): void {
+    this.frameBuffer.clear();
+    this.seenFrameIds.clear();
+    for (const [, timer] of this.roomTimers) {
+      clearTimeout(timer);
+    }
+    this.roomTimers.clear();
+  }
+
   resume(): void {
     this.paused = false;
     // Restart timers for any frames that were buffered during pause
