@@ -64,14 +64,33 @@ export default function FindingsPanel({
   const [sheetIndex, setSheetIndex] = useState(0);
   const [dismissed, setDismissed] = useState(false);
   const sheetRef = useRef<BottomSheet>(null);
+  const lastVisibleSignatureRef = useRef<string>("");
+  const findingSignature = findings
+    .map((finding) => finding.id)
+    .sort()
+    .join("|");
 
-  // Re-show the sheet when new findings arrive
+  // Re-show the sheet when the finding set actually changes, not just the count.
   React.useEffect(() => {
-    if (findings.length > 0 && dismissed) {
+    if (findings.length === 0) {
+      lastVisibleSignatureRef.current = "";
+      if (dismissed) {
+        setDismissed(false);
+      }
+      return;
+    }
+
+    const hasNewFindings = findingSignature !== lastVisibleSignatureRef.current;
+    if (dismissed && hasNewFindings) {
       setDismissed(false);
       sheetRef.current?.snapToIndex(0);
+      return;
     }
-  }, [findings.length, dismissed]);
+
+    if (!dismissed) {
+      lastVisibleSignatureRef.current = findingSignature;
+    }
+  }, [dismissed, findingSignature, findings.length]);
 
   const handleConfirm = useCallback(
     (id: string) => {

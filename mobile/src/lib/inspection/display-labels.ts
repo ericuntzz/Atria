@@ -13,7 +13,7 @@ export interface InspectionDisplayTarget {
 const GENERIC_NUMBERED_LABEL_RE =
   /^(?:view|angle|area|spot|shot|photo|image|picture|frame)\s+(\d+)$/i;
 const GENERIC_TYPED_LABEL_RE =
-  /^(?:room overview|overview|detail(?: view)?|close[- ]?up(?: check)?)(?:\s+(\d+))?$/i;
+  /^(?:room overview|overview|detail(?: view| spot)?|close[- ]?up(?: check)?)(?:\s+(\d+))?$/i;
 
 function cleanLabelText(value?: string | null): string {
   return (value || "")

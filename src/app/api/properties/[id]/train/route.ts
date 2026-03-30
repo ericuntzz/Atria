@@ -59,7 +59,8 @@ function normalizeInspectionLabel(
   const isGeneric =
     !cleanedLabel ||
     GENERIC_IMAGE_LABEL_RE.test(cleanedLabel) ||
-    GENERIC_TYPED_IMAGE_LABEL_RE.test(cleanedLabel);
+    GENERIC_TYPED_IMAGE_LABEL_RE.test(cleanedLabel) ||
+    GENERIC_SUFFIX_LABEL_RE.test(cleanedLabel);
 
   if (!isGeneric) {
     return cleanedLabel;
@@ -83,7 +84,7 @@ function normalizeInspectionLabel(
     return detailSubject;
   }
   if (imageType === "detail") {
-    return `Detail spot ${fallbackIndex + 1}`;
+    return `Detail view ${fallbackIndex + 1}`;
   }
 
   // Last resort — use numbered area label that the client can display cleanly
