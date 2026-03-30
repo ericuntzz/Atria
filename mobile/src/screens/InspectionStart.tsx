@@ -91,7 +91,7 @@ export default function InspectionStartScreen() {
   };
 
   return (
-    <SafeAreaView style={styles.container} edges={["top"]}>
+    <SafeAreaView style={styles.container} edges={["top", "bottom"]}>
       {/* Back button */}
       <TouchableOpacity
         style={styles.backButton}

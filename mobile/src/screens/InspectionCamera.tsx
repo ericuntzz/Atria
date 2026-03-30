@@ -1408,6 +1408,11 @@ export default function InspectionCameraScreen() {
         clearTimeout(yoloLoadTimerRef.current);
         yoloLoadTimerRef.current = null;
       }
+      // Stop auto-capture timer to prevent comparisons while model is disposed
+      if (autoCaptureTimerRef.current) {
+        clearInterval(autoCaptureTimerRef.current);
+        autoCaptureTimerRef.current = null;
+      }
       // Pause and clear the batch analyzer's own buffered frames to free memory.
       batchAnalyzerRef.current?.pause();
       batchAnalyzerRef.current?.clearBufferedFrames();
