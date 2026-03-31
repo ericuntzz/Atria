@@ -55,14 +55,16 @@ async function readQueue(): Promise<PendingBulkSubmission[]> {
 
 async function writeQueue(queue: PendingBulkSubmission[]): Promise<void> {
   const file = getQueueFile();
-  // Atomic write: write to temp file, then move (rename is atomic on POSIX/iOS)
+  // Atomic write: write to temp file, then move.
+  // iOS FileManager.moveItem fails if the destination already exists,
+  // so we delete the target first. withQueueLock serializes all callers
+  // so the delete→move window has no concurrent access.
   const tmpFile = new File(Paths.cache, `${QUEUE_FILE_NAME}.tmp`);
   try {
-    if (!tmpFile.exists) {
-      tmpFile.create({ intermediates: true, overwrite: true });
-    }
+    if (tmpFile.exists) tmpFile.delete(); // Remove any leftover tmp
+    tmpFile.create({ intermediates: true, overwrite: true });
     tmpFile.write(JSON.stringify(queue));
-    // Move replaces the target atomically
+    if (file.exists) file.delete(); // iOS requires no existing target for move
     tmpFile.move(file);
   } catch (err) {
     // Clean up temp file on failure
@@ -93,6 +95,7 @@ export function enqueueBulkSubmission(params: {
       completionTier: params.completionTier,
       notes: params.notes,
       events: params.events,
+      effectiveCoverage: params.effectiveCoverage,
       createdAt: Date.now(),
     });
     await writeQueue(queue);
