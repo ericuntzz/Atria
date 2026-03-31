@@ -55,11 +55,13 @@ async function readQueue(): Promise<PendingBulkSubmission[]> {
 
 async function writeQueue(queue: PendingBulkSubmission[]): Promise<void> {
   const file = getQueueFile();
-  // Atomic write: write to temp file, then move.
-  // iOS FileManager.moveItem fails if the destination already exists,
-  // so we delete the target first. withQueueLock serializes all callers
-  // so the delete→move window has no concurrent access.
-  const tmpFile = new File(Paths.cache, `${QUEUE_FILE_NAME}.tmp`);
+  // Atomic write: write to temp file in the same directory, then rename.
+  // tmpFile must be in the same directory as `file` (Paths.document) so that
+  // the move is a same-directory rename — cross-directory moves with
+  // expo-file-system treat the File destination as a directory and keep the
+  // original filename, causing "item with the same name already exists" on
+  // the second write.
+  const tmpFile = new File(Paths.document, `${QUEUE_FILE_NAME}.tmp`);
   try {
     if (tmpFile.exists) tmpFile.delete(); // Remove any leftover tmp
     tmpFile.create({ intermediates: true, overwrite: true });
